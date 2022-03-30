@@ -1,0 +1,93 @@
+body {
+    -webkit-tap-highlight-color: rgba(0,0,0,0);
+    -webkit-text-size-adjust: 100%;
+    line-height: 1.42857143;
+    font-size: 16px;
+    font-family: 'Droid Sans',sans-serif;
+    box-sizing: border-box;
+    display: block;
+    background-color: rgba(30,34,36,0.9);
+    color: #fff;
+    border: 1px solid #000;
+    padding: 15px;
+    padding-top: 0px;
+}
+
+h1 {
+    -webkit-tap-highlight-color: rgba(0,0,0,0);
+    -webkit-text-size-adjust: 100%;
+    box-sizing: border-box;
+    margin: .67em 0;
+    font-weight: 500;
+    line-height: 1.1;
+    margin-bottom: 10px;
+    margin-top: 10px;
+    color: #0093a3;
+    font-size: 40px;
+    padding: 0 !important;
+    font-family: 'Droid Sans',sans-serif;
+}
+
+h2 {
+    -webkit-tap-highlight-color: rgba(0,0,0,0);
+    -webkit-text-size-adjust: 100%;
+    box-sizing: border-box;
+    font-weight: 500;
+    line-height: 1.1;
+    font-size: 30px;
+    margin-bottom: 10px;
+    margin-top: 10px;
+    color: #0093a3;
+    font-family: 'Droid Sans',sans-serif;
+}
+
+h3 {
+    -webkit-tap-highlight-color: rgba(0,0,0,0);
+    -webkit-text-size-adjust: 100%;
+    box-sizing: border-box;
+    font-weight: 500;
+    line-height: 1.1;
+    font-size: 24px;
+    margin-bottom: 10px;
+    margin-top: 10px;
+    color: #0093a3;
+    font-family: 'Droid Sans',sans-serif;
+}
+
+pre.ignore\:true{
+    -webkit-tap-highlight-color: rgba(0,0,0,0);
+    -webkit-text-size-adjust: 100%;
+    box-sizing: border-box;
+    overflow: auto;
+    font-family: Menlo,Monaco,Consolas,"Courier New",monospace;
+    display: block;
+    padding: 9.5px;
+    margin: 0 0 10px;
+    line-height: 1.42857143;
+    word-break: break-all;
+    word-wrap: break-word;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    background-color: #223241;
+    color: #fff;
+    font-size: 16px;
+}
+
+img {
+    max-width: 100%;
+    height: auto;
+}
+
+a {
+    -webkit-tap-highlight-color: rgba(0,0,0,0);
+    -webkit-text-size-adjust: 100%;
+    line-height: 1.42857143;
+    font-family: 'Droid Sans',sans-serif;
+    box-sizing: border-box;
+    background: 0 0;
+    cursor: pointer;
+    outline: 0 none;
+    transition: all .3s ease;
+    text-decoration: none;
+    color: #0093a3;    
+}

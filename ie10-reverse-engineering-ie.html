@@ -1,0 +1,1082 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>IE10: Reverse Engineering IE</title>
+    <link rel="stylesheet" href="styles.css">
+
+    <link rel="stylesheet" href="highlight/styles/stackoverflow-dark.min.css">
+    <script src="highlight/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+</head>
+<body>
+
+<div class="inner-content"><header class="page-header"><h1 class="page-title">IE10: Reverse Engineering IE</h1></header><div class="page-content"><p>For this exploit I’m using a <span style="color: #00ccff;">VirtualBox</span> VM with <span style="color: #00ccff;">Windows 7 64-bit SP1</span> and the version of <span style="color: #00ccff;">Internet Explorer 10</span> downloaded from <a href="http://www.oldapps.com/internet_explorer.php?old_internet_explorer=8664">here</a>.</p><p>To successfully exploit IE 10 we need to defeat both <span style="color: #00ccff;">ASLR</span> and <span style="color: #00ccff;">DEP</span>. We’re going to exploit a <span style="color: #00ccff;">UAF</span> to modify the length of an array so that we can read and write through the whole process address space. The ability of reading/writing wherever we want is a very powerful capability. From there we can go two ways:</p><ol><li>Run <span style="color: #00ccff;">ActiveX</span> objects (<em>God mode</em>)</li><li>Execute regular shellcode</li></ol><p>For the phase UAF → <span style="color: #00ccff;">arbitrary read/write</span> we’re going to use a method described <a href="https://cansecwest.com/slides/2014/The Art of Leaks - read version - Yoyo.pdf">here</a>.</p><p>Reading that paper is not enough to fully understand the method because some details are missing and I also found some differences between theory and practice.</p><p>My goal is not to simply describe a method, but to show all the work involved in the creation of a complete exploit. The first step is to do a little investigation with WinDbg and discover how arrays and other objects are laid out in memory.</p><h2>Reverse Engineering IE</h2><p>Some objects we want to analyze are:</p><ul><li><span style="color: #00ff00;">Array</span></li><li><span style="color: #00ff00;">LargeHeapBlock</span></li><li><span style="color: #00ff00;">ArrayBuffer</span></li><li><span style="color: #00ff00;">Int32Array</span></li></ul><h3>Setting up WinDbg</h3><p>By now you should already have become familiar with WinDbg and set it up appropriately, but let’s make sure. First, load WinDbg (always the <span style="color: #00ccff;">32-bit</span> version, <em>as administrator</em>), press <span style="color: #00ff00;">CTRL-S</span> and enter the <span style="color: #00ff00;">symbol path</span>. For instance, here’s mine:</p><pre class="ignore:true">SRV*C:\WinDbgSymbols*http://msdl.microsoft.com/download/symbols</pre><p>Remember that the first part is the local directory for caching the symbols downloaded from the server.</p><p>Hit <span style="color: #00ff00;">OK</span> and then save the workspace by clicking on <span style="color: #00ff00;">File</span>→<span style="color: #00ff00;">Save Workspace</span>.</p><p>Now run Internet Explorer 10 and in WinDbg hit <span style="color: #00ff00;">F6</span> to <span style="color: #00ff00;">Attach to process</span>. You’ll see that <span style="color: #00ff00;">iexplore.exe</span> appears twice in the list. The first instance of <span style="color: #00ff00;">iexplore.exe</span> is the main process whereas the second is the process associated with the first <span style="color: #00ccff;">tab</span> opened in IE. If you open other tabs, you’ll see more instances of the same process. Select the second instance like shown in the picture below:</p><p>
+<a href="images/pic_1.png"><img src="images/pic_1.png" alt="pic_1" width="518" height="655"></a>
+</p><p>This is the layout I use for WinDbg:</p><p>
+<a href="images/pic_2.png"><img src="images/pic_2.png" alt="pic_2" width="1710" height="946"></a>
+<br> Set the windows the way you like and then save the workspace again.</p><h3>Array</h3><p>Let’s start with the object <span style="color: #00ff00;">Array</span>. Create an html file with the following code:</p>
+
+<pre><code class="language-html">&lt;html&gt;
+&lt;head&gt;
+&lt;script language="javascript"&gt;
+  alert("Start");
+  var a = new Array(0x123);
+  for (var i = 0; i &lt; 0x123; ++i)
+    a[i] = 0x111;
+  alert("Done");
+&lt;/script&gt;
+&lt;/head&gt;
+&lt;body&gt;
+&lt;/body&gt;
+&lt;/html&gt;
+</code></pre>
+
+<p>Open the file in IE, allow blocked content, and when the dialog box with the text <span style="color: #00ff00;">Start</span> pops up run WinDbg, hit <span style="color: #00ff00;">F6</span> and attach the debugger to the second instance of <span style="color: #00ff00;">iexplore.exe</span> like you did before. Hit <span style="color: #00ff00;">F5</span> (go) to resume execution and close the dialog box in IE. Now you should be seeing the second dialog with the message <span style="color: #00ff00;">Done</span>.</p><p>Go back in WinDbg and try to search the memory for the content of the array. As you can see by looking at the source code, the array contains a sequence of <span style="color: #00ff00;">0x111</span>. Here’s what we get:</p><pre class="ignore:true">0:004&gt; s-d 0 L?ffffffff 111 111 111 111</pre><p>We got nothing! How odd… But even if we had found the array in memory, that wouldn’t have been enough to locate the code which does the actual allocation. We need a smarter way.</p><p>Why don’t we spray the heap? Let’s change the code:</p>
+
+<pre><code class="language-html">&lt;html&gt;
+&lt;head&gt;
+&lt;script language="javascript"&gt;
+  alert("Start");
+  var a = new Array();
+  for (var i = 0; i &lt; 0x10000; ++i) {
+    a[i] = new Array(0x1000/4);     // 0x1000 bytes = 0x1000/4 dwords
+    for (var j = 0; j &lt; a[i].length; ++j)
+      a[i][j] = 0x111;
+  }
+  alert("Done");
+&lt;/script&gt;
+&lt;/head&gt;
+&lt;body&gt;
+&lt;/body&gt;
+&lt;/html&gt;
+</code></pre>
+
+<p>After updating the html file, resume the execution in WinDbg (<span style="color: #00ff00;">F5</span>), close the <span style="color: #00ff00;">Done</span> dialog box in IE and reload the page (<span style="color: #00ff00;">F5</span>). Close the dialog box (<span style="color: #00ff00;">Start</span>) and wait for the next dialog box to appear. Now let’s have a look at IE’s memory usage by opening the <span style="color: #00ccff;">Task Manager</span>:</p><p>
+<a href="images/pic_3.png"><img src="images/pic_3.png" alt="pic_3" width="509" height="564"></a>
+</p><p>We allocated about <span style="color: #00ff00;">550 MB</span>. We can use an application called <span style="color: #00ccff;">VMMap</span> (<a href="https://technet.microsoft.com/en-us/library/dd535533.aspx">download</a>) to get a graphical depiction of our <span style="color: #00ccff;">heap spray</span>.</p><p>Open VMMap and select the right instance of<span style="color: #00ff00;"> iexplore.exe</span> as shown in the picture below:</p><p>
+<a href="images/pic_4.png"><img src="images/pic_4.png" alt="pic_4" width="569" height="619"></a>
+</p><p>Now go to <span style="color: #00ff00;">View</span>→<span style="color: #00ff00;">Fragmentation View</span>. You’ll see something like this:</p><p>
+<a href="images/pic_5.png"><img src="images/pic_5.png" alt="pic_5" width="749" height="851"></a>
+<br> The area in yellow is the memory allocated through the heap spray. Let’s try to analyze the memory at the address <span style="color: #00ff00;">0x1ffd0000</span>, which is in the middle of our data:</p><p>
+<a href="images/pic_6.png"><img src="images/pic_6.png" alt="pic_6" width="1710" height="937"></a>
+<br> Let’s make it sure that this is indeed one of our arrays by modifying the code a bit:</p>
+
+<pre><code class="language-html">&lt;html&gt;
+&lt;head&gt;
+&lt;script language="javascript"&gt;
+  alert("Start");
+  var a = new Array();
+  for (var i = 0; i &lt; 0x10000; ++i) {
+    a[i] = new Array(0x1234/4);     // 0x1234/4 = 0x48d
+    for (var j = 0; j &lt; a[i].length; ++j)
+      a[i][j] = 0x123;
+  }
+  alert("Done");
+&lt;/script&gt;
+&lt;/head&gt;
+&lt;body&gt;
+&lt;/body&gt;
+&lt;/html&gt;
+</code></pre>
+
+<p>We repeat the process and here’s the result:</p><p>
+<a href="images/pic_7.png"><img src="images/pic_7.png" alt="pic_7" width="1710" height="937"></a>
+<br> As we can see, now the array contains the values <span style="color: #00ff00;">0x247</span>. Let’s try something different:</p>
+
+<pre><code class="language-html">&lt;html&gt;
+&lt;head&gt;
+&lt;script language="javascript"&gt;
+  alert("Start");
+  var a = new Array();
+  for (var i = 0; i &lt; 0x10000; ++i) {
+    a[i] = new Array(0x1000/4);
+    for (var j = 0; j &lt; a[i].length; ++j)
+      a[i][j] = j;
+  }
+  alert("Done");
+&lt;/script&gt;
+&lt;/head&gt;
+&lt;body&gt;
+&lt;/body&gt;
+&lt;/html&gt;
+</code></pre>
+
+<p>Now we get the following:</p><p>
+<a href="images/pic_8.png"><img src="images/pic_8.png" alt="pic_8" width="1710" height="937"></a>
+<br> Now the array contains the odd numbers starting with <span style="color: #00ff00;">1</span>. We know that our array contains the numbers</p><pre class="ignore:true">1 2 3 4 5 6 7 8 9 ...</pre><p>but we get</p><pre class="ignore:true">3 5 7 9 11 13 15 17 19 ...</pre><p>It’s clear that the number <span style="color: #00ff00;">n</span> is represented as <span style="color: #00ff00;">n*2 + 1</span>. Why is that? You should know that an array can also contain references to objects so there must be a way to tell integers and addresses apart. Since addresses are multiple of <span style="color: #00ff00;">4</span>, by representing any integer as an odd number, it’ll never be confused with a reference. But what about a number such as <span style="color: #00ff00;">0x7fffffff</span> which is the biggest positive number in <span style="color: #00ccff;">2-complement</span>? Let’s experiment a bit:</p>
+
+<pre><code class="language-html">&lt;html&gt;
+&lt;head&gt;
+&lt;script language="javascript"&gt;
+  alert("Start");
+  var a = new Array();
+  for (var i = 0; i &lt; 0x10000; ++i) {
+    a[i] = new Array(0x1000/4);
+    a[i][0] = 0x7fffffff;
+    a[i][1] = -2;
+    a[i][2] = 1.2345;
+    a[i][3] = document.createElement("div");
+  }
+  alert("Done");
+&lt;/script&gt;
+&lt;/head&gt;
+&lt;body&gt;
+&lt;/body&gt;
+&lt;/html&gt;
+</code></pre>
+
+<p>Here’s what our array looks like now:</p><p>
+<a href="images/pic_9.png"><img src="images/pic_9.png" alt="pic_9" width="1710" height="937"></a>
+<br> The number <span style="color: #00ff00;">0x7fffffff</span> is too big to be stored directly so, instead, IE stores a reference to a <span style="color: #00ff00;">JavascriptNumber</span> object. The number <span style="color: #00ff00;">-2</span> is stored directly because it can’t be confused with an address, having its highest bit set.</p><p>As you should know by now, the first dword of an object is usually a pointer to its <span style="color: #00ccff;">vftable</span>. As you can see from the picture above, this is useful to determine the identity of an object.</p><p>Now let’s find out what code allocates the array. We can see that there are probably two headers:</p><p>
+<a href="images/pic_10.png"><img src="images/pic_10.png" alt="pic_10" width="693" height="480"></a>
+</p><p>The first header tells us that the allocated block is <span style="color: #00ff00;">0x1010</span> bytes. Indeed, the allocated block has 0x10 bytes of header and <span style="color: #00ff00;">0x1000</span> bytes of actual data. Because we know that one of our array we’ll be at the address <span style="color: #00ff00;">0x1ffd0000</span>, we can put hardware breakpoints (on write) on fields of both headers. This way we can find out both what code allocates the block and what code creates the object.</p><p>First reload the page and stop at the <span style="color: #00ff00;">Start</span> dialog box. Go to WinDbg and stop the execution (<span style="color: #00ff00;">CTRL+Break</span>). Now set the two breakpoints:</p><pre class="ignore:true">0:004&gt; ba w4 1ffd0000+4
+0:004&gt; ba w4 1ffd0000+14
+0:004&gt; bl
+ 0 e 1ffd0004 w 4 0001 (0001)  0:****
+ 1 e 1ffd0014 w 4 0001 (0001)  0:****</pre><p>Hit <span style="color: #00ff00;">F5</span> (ignore the error messages) and close the dialog box in IE. When the first breakpoint is triggered, display the stack:</p><pre class="ignore:true">0:007&gt; k 20
+ChildEBP RetAddr  
+0671bb30 6ea572d8 jscript9!Recycler::LargeAlloc+0xa1      &lt;----------------------
+0671bb4c 6eb02c47 jscript9!Recycler::AllocZero+0x91       &lt;----------------------
+0671bb8c 6ea82aae jscript9!Js::JavascriptArray::DirectSetItem_Full+0x3fd     &lt;----------------- (*)
+0671bc14 05f2074b jscript9!Js::JavascriptOperators::OP_SetElementI+0x1e0
+WARNING: Frame IP not in any known module. Following frames may be wrong.
+0671bc48 6ea77461 0x5f2074b
+0671bde4 6ea55cf5 jscript9!Js::InterpreterStackFrame::Process+0x4b47
+0671bf2c 05f80fe9 jscript9!Js::InterpreterStackFrame::InterpreterThunk&lt;1&gt;+0x305
+0671bf38 6ea51f60 0x5f80fe9
+0671bfb8 6ea520ca jscript9!Js::JavascriptFunction::CallRootFunction+0x140
+0671bfd0 6ea5209f jscript9!Js::JavascriptFunction::CallRootFunction+0x19
+0671c018 6ea52027 jscript9!ScriptSite::CallRootFunction+0x40
+0671c040 6eafdf75 jscript9!ScriptSite::Execute+0x61
+0671c0cc 6eafdb57 jscript9!ScriptEngine::ExecutePendingScripts+0x1e9
+0671c154 6eafe0b7 jscript9!ScriptEngine::ParseScriptTextCore+0x2ad
+0671c1a8 069cb60c jscript9!ScriptEngine::ParseScriptText+0x5b
+0671c1e0 069c945d MSHTML!CActiveScriptHolder::ParseScriptText+0x42
+0671c230 069bb52f MSHTML!CJScript9Holder::ParseScriptText+0x58
+0671c2a4 069cc6a4 MSHTML!CScriptCollection::ParseScriptText+0x1f0
+0671c394 069cc242 MSHTML!CScriptData::CommitCode+0x36e
+0671c40c 069cbe6e MSHTML!CScriptData::Execute+0x233
+0671c420 069c9b49 MSHTML!CHtmScriptParseCtx::Execute+0x89
+0671c498 067d77cc MSHTML!CHtmParseBase::Execute+0x17c
+0671c4c4 755862fa MSHTML!CHtmPost::Broadcast+0x88
+0671c5c4 069c3273 user32!InternalCallWinProc+0x23
+0671c5dc 069c31ff MSHTML!CHtmPost::Run+0x1c
+0671c5f4 069c34f3 MSHTML!PostManExecute+0x5f
+0671c610 069c34b2 MSHTML!PostManResume+0x7b
+0671c650 06830dc9 MSHTML!CHtmPost::OnDwnChanCallback+0x3a
+0671c660 0677866c MSHTML!CDwnChan::OnMethodCall+0x19
+0671c6b4 067784fa MSHTML!GlobalWndOnMethodCall+0x169
+0671c700 755862fa MSHTML!GlobalWndProc+0xd7
+0671c72c 75586d3a user32!InternalCallWinProc+0x23</pre><p>We can see three things:</p><ol><li>IE uses a custom allocator.</li><li>The array is of type <span style="color: #00ff00;">jscript9!Js::JavascriptArray</span>.</li><li>The block is probably allocated when we set the value of the first item of the array (*).</li></ol><p>Let’s return from the current call with <span style="color: #00ff00;">Shift+F11</span>. We land here:</p><pre class="ignore:true">6e9e72ce 6a00            push    0
+6e9e72d0 50              push    eax
+6e9e72d1 51              push    ecx
+6e9e72d2 56              push    esi
+6e9e72d3 e80f34ffff      call    jscript9!Recycler::LargeAlloc (6e9da6e7)
+6e9e72d8 c70000000000    mov     dword ptr [eax],0    ds:002b:1ffd0010=00000000    &lt;----- we are here
+6e9e72de 5e              pop     esi
+6e9e72df 5d              pop     ebp
+6e9e72e0 c20400          ret     4</pre><p>Let’s hit <span style="color: #00ff00;">Shift+F11</span> again:</p><pre class="ignore:true">6ea92c3f 51              push    ecx
+6ea92c40 8bca            mov     ecx,edx
+6ea92c42 e89a67f4ff      call    jscript9!Recycler::AllocZero (6e9d93e1)
+6ea92c47 8b55e8          mov     edx,dword ptr [ebp-18h] ss:002b:04d2c058=04d2c054  &lt;----- we are here
+6ea92c4a 8b0a            mov     ecx,dword ptr [edx]
+6ea92c4c c70000000000    mov     dword ptr [eax],0</pre><p><span style="color: #00ff00;">EAX</span> points to the buffer, so we can put a breakpoint on <span style="color: #00ff00;">6ea92c47</span>. First let’s write the address of <span style="color: #00ff00;">EIP</span> so that it doesn’t depend on the specific base address of the module. First of all we’re in <span style="color: #00ff00;">jscript9</span>, as we can see from this:</p><pre class="ignore:true">0:007&gt; !address @eip
+
+                                     
+Mapping file section regions...
+Mapping module regions...
+Mapping PEB regions...
+Mapping TEB and stack regions...
+Mapping heap regions...
+Mapping page heap regions...
+Mapping other regions...
+Mapping stack trace database regions...
+Mapping activation context regions...
+
+
+Usage:                  Image
+Base Address:           6e9d1000
+End Address:            6ec54000
+Region Size:            00283000
+State:                  00001000  MEM_COMMIT
+Protect:                00000020  PAGE_EXECUTE_READ
+Type:                   01000000  MEM_IMAGE
+Allocation Base:        6e9d0000
+Allocation Protect:     00000080  PAGE_EXECUTE_WRITECOPY
+Image Path:             C:\Windows\SysWOW64\jscript9.dll
+Module Name:            jscript9        &lt;-----------------------------------------
+Loaded Image Name:      C:\Windows\SysWOW64\jscript9.dll
+Mapped Image Name:      
+More info:              lmv m jscript9
+More info:              !lmi jscript9
+More info:              ln 0x6ea92c47
+More info:              !dh 0x6e9d0000
+
+Unloaded modules that overlapped the address in the past:
+    BaseAddr  EndAddr     Size
+    6ea90000 6ebed000   15d000 VBoxOGL-x86.dll
+    6e9b0000 6eb0d000   15d000 VBoxOGL-x86.dll
+
+
+Unloaded modules that overlapped the region in the past:
+    BaseAddr  EndAddr     Size
+    6ebf0000 6eccb000    db000 wined3dwddm-x86.dll
+    6ea90000 6ebed000   15d000 VBoxOGL-x86.dll
+    6e940000 6ea84000   144000 VBoxOGLcrutil-x86.dll
+    6eb10000 6ebeb000    db000 wined3dwddm-x86.dll
+    6e9b0000 6eb0d000   15d000 VBoxOGL-x86.dll</pre><p>So, the <span style="color: #00ccff;">RVA</span> is the following:</p><pre class="ignore:true">0:007&gt; ? @eip-jscript9
+Evaluate expression: 797767 = 000c2c47</pre><p>The creation of the array (its data, to be exact) can be logged with the following breakpoint:</p><pre class="ignore:true">bp jscript9+c2c47 ".printf \"new Array Data: addr = 0x%p\\n\",eax;g"</pre><p>Note that we need to escape the double quotes and the back slash because we’re already inside a string. Also, the command <span style="color: #00ff00;">g</span> (go) is used to resume the execution after the breakpoint is triggered, because we want to print a message without stopping the execution.</p><p>Let’s get back to what we were doing. We set two hardware breakpoints and only the first was triggered, so let’s get going. After we hit <span style="color: #00ff00;">F5</span> one more time, the second breakpoint is triggered and the stack looks like this:</p><pre class="ignore:true">0:007&gt; k 20
+ChildEBP RetAddr  
+0671bb8c 6ea82aae jscript9!Js::JavascriptArray::DirectSetItem_Full+0x40b    &lt;----------------
+0671bc14 05f2074b jscript9!Js::JavascriptOperators::OP_SetElementI+0x1e0
+WARNING: Frame IP not in any known module. Following frames may be wrong.
+0671bc48 6ea77461 0x5f2074b
+0671bde4 6ea55cf5 jscript9!Js::InterpreterStackFrame::Process+0x4b47
+0671bf2c 05f80fe9 jscript9!Js::InterpreterStackFrame::InterpreterThunk&lt;1&gt;+0x305
+0671bf38 6ea51f60 0x5f80fe9
+0671bfb8 6ea520ca jscript9!Js::JavascriptFunction::CallRootFunction+0x140
+0671bfd0 6ea5209f jscript9!Js::JavascriptFunction::CallRootFunction+0x19
+0671c018 6ea52027 jscript9!ScriptSite::CallRootFunction+0x40
+0671c040 6eafdf75 jscript9!ScriptSite::Execute+0x61
+0671c0cc 6eafdb57 jscript9!ScriptEngine::ExecutePendingScripts+0x1e9
+0671c154 6eafe0b7 jscript9!ScriptEngine::ParseScriptTextCore+0x2ad
+0671c1a8 069cb60c jscript9!ScriptEngine::ParseScriptText+0x5b
+0671c1e0 069c945d MSHTML!CActiveScriptHolder::ParseScriptText+0x42
+0671c230 069bb52f MSHTML!CJScript9Holder::ParseScriptText+0x58
+0671c2a4 069cc6a4 MSHTML!CScriptCollection::ParseScriptText+0x1f0
+0671c394 069cc242 MSHTML!CScriptData::CommitCode+0x36e
+0671c40c 069cbe6e MSHTML!CScriptData::Execute+0x233
+0671c420 069c9b49 MSHTML!CHtmScriptParseCtx::Execute+0x89
+0671c498 067d77cc MSHTML!CHtmParseBase::Execute+0x17c
+0671c4c4 755862fa MSHTML!CHtmPost::Broadcast+0x88
+0671c5c4 069c3273 user32!InternalCallWinProc+0x23
+0671c5dc 069c31ff MSHTML!CHtmPost::Run+0x1c
+0671c5f4 069c34f3 MSHTML!PostManExecute+0x5f
+0671c610 069c34b2 MSHTML!PostManResume+0x7b
+0671c650 06830dc9 MSHTML!CHtmPost::OnDwnChanCallback+0x3a
+0671c660 0677866c MSHTML!CDwnChan::OnMethodCall+0x19
+0671c6b4 067784fa MSHTML!GlobalWndOnMethodCall+0x169
+0671c700 755862fa MSHTML!GlobalWndProc+0xd7
+0671c72c 75586d3a user32!InternalCallWinProc+0x23
+0671c7a4 755877c4 user32!UserCallWinProcCheckWow+0x109
+0671c804 7558788a user32!DispatchMessageWorker+0x3bc</pre><p>By comparing the last two stack traces, we can see that we’re still in the same call of <span style="color: #00ff00;">jscript9!Js::JavascriptArray::DirectSetItem_Full</span>. So, <span style="color: #00ff00;">DirectSetItem_Full</span> first allocates a block of <span style="color: #00ff00;">0x1010</span> bytes through <span style="color: #00ff00;">jscript9!Recycler::AllocZero</span> and then initializes the object.</p><p>But if all this happens inside <span style="color: #00ff00;">jscript9!Js::JavascriptArray::DirectSetItem_Full</span>, then the <span style="color: #00ff00;">JavascriptArray</span> instance has already been created. Let’s try to break on the constructor. First let’s make sure that it exists:</p><pre class="ignore:true">0:007&gt; x jscript9!Js::JavascriptArray::JavascriptArray
+6ea898d6          jscript9!Js::JavascriptArray::JavascriptArray (&lt;no parameter info&gt;)
+6ead481d          jscript9!Js::JavascriptArray::JavascriptArray (&lt;no parameter info&gt;)
+6eb28b61          jscript9!Js::JavascriptArray::JavascriptArray (&lt;no parameter info&gt;)</pre><p>We got three addresses.</p><p>Let’s delete the previous breakpoints with <span style="color: #00ff00;">bc *</span>, hit <span style="color: #00ff00;">F5</span> and reload the page in IE. At the first dialog box, let’s go back in WinDbg. Now let’s put a breakpoint at each one of the three addresses:</p><pre class="ignore:true">0:006&gt; bp 6ea898d6          
+0:006&gt; bp 6ead481d          
+0:006&gt; bp 6eb28b61          
+0:006&gt; bl
+ 0 e 6ea898d6     0001 (0001)  0:**** jscript9!Js::JavascriptArray::JavascriptArray
+ 1 e 6ead481d     0001 (0001)  0:**** jscript9!Js::JavascriptArray::JavascriptArray
+ 2 e 6eb28b61     0001 (0001)  0:**** jscript9!Js::JavascriptArray::JavascriptArray</pre><p>Hit <span style="color: #00ff00;">F5</span> and close the dialog box. Mmm… the <span style="color: #00ff00;">Done</span> dialog box appears and none of our breakpoints is triggered. How odd…</p><p>Let’s see if we find something interesting in the list of symbols:</p><pre class="ignore:true">0:006&gt; x jscript9!Js::JavascriptArray::*
+6ec61e36          jscript9!Js::JavascriptArray::IsEnumerable (&lt;no parameter info&gt;)
+6eabff71          jscript9!Js::JavascriptArray::GetFromIndex (&lt;no parameter info&gt;)
+6ec31bed          jscript9!Js::JavascriptArray::BigIndex::BigIndex (&lt;no parameter info&gt;)
+6ec300ee          jscript9!Js::JavascriptArray::SetEnumerable (&lt;no parameter info&gt;)
+6eb94bd9          jscript9!Js::JavascriptArray::EntrySome (&lt;no parameter info&gt;)
+6eace48c          jscript9!Js::JavascriptArray::HasItem (&lt;no parameter info&gt;)
+6ea42530          jscript9!Js::JavascriptArray::`vftable' = &lt;no type information&gt;
+6ec31a2f          jscript9!Js::JavascriptArray::BigIndex::SetItem (&lt;no parameter info&gt;)
+6ec301d1          jscript9!Js::JavascriptArray::IsDirectAccessArray (&lt;no parameter info&gt;)
+6eacab83          jscript9!Js::JavascriptArray::Sort (&lt;no parameter info&gt;)
+6ecd5500          jscript9!Js::JavascriptArray::EntryInfo::Map = &lt;no type information&gt;
+6eb66721          jscript9!Js::JavascriptArray::EntryIsArray (&lt;no parameter info&gt;)
+6ec2fd64          jscript9!Js::JavascriptArray::GetDiagValueString (&lt;no parameter info&gt;)
+6ec2faeb          jscript9!Js::JavascriptArray::GetNonIndexEnumerator (&lt;no parameter info&gt;)
+6ec3043a          jscript9!Js::JavascriptArray::Unshift&lt;Js::JavascriptArray::BigIndex&gt; (&lt;no parameter info&gt;)
+6eb4ba72          jscript9!Js::JavascriptArray::EntryReverse (&lt;no parameter info&gt;)
+6eaed10f          jscript9!Js::JavascriptArray::SetLength (&lt;no parameter info&gt;)
+6eacaadf          jscript9!Js::JavascriptArray::EntrySort (&lt;no parameter info&gt;)
+6ec306c9          jscript9!Js::JavascriptArray::ToLocaleString&lt;Js::JavascriptArray&gt; (&lt;no parameter info&gt;)
+6eb5f4ce          jscript9!Js::JavascriptArray::BuildSegmentMap (&lt;no parameter info&gt;)
+6ec2fef5          jscript9!Js::JavascriptArray::Freeze (&lt;no parameter info&gt;)
+6ec31c5f          jscript9!Js::JavascriptArray::GetLocaleSeparator (&lt;no parameter info&gt;)
+6ecd54f0          jscript9!Js::JavascriptArray::EntryInfo::LastIndexOf = &lt;no type information&gt;
+6eb9b990          jscript9!Js::JavascriptArray::EntryUnshift (&lt;no parameter info&gt;)
+6ec30859          jscript9!Js::JavascriptArray::ObjectSpliceHelper&lt;unsigned int&gt; (&lt;no parameter info&gt;)
+6ec31ab5          jscript9!Js::JavascriptArray::BigIndex::operator+ (&lt;no parameter info&gt;)
+6ea898d6          jscript9!Js::JavascriptArray::JavascriptArray (&lt;no parameter info&gt;)
+6eb5f8f5          jscript9!Js::JavascriptArray::ArrayElementEnumerator::ArrayElementEnumerator (&lt;no parameter info&gt;)
+6ec30257          jscript9!Js::JavascriptArray::IndexTrace&lt;unsigned int&gt;::SetItem (&lt;no parameter info&gt;)
+6ead481d          jscript9!Js::JavascriptArray::JavascriptArray (&lt;no parameter info&gt;)
+6eac281d          jscript9!Js::JavascriptArray::ConcatArgs&lt;unsigned int&gt; (&lt;no parameter info&gt;)
+6ecd5510          jscript9!Js::JavascriptArray::EntryInfo::Reduce = &lt;no type information&gt;
+6ea9bf88          jscript9!Js::JavascriptArray::DirectSetItem_Full (&lt;no parameter info&gt;)
+6eb9d5ee          jscript9!Js::JavascriptArray::EntryConcat (&lt;no parameter info&gt;)
+6ecd5490          jscript9!Js::JavascriptArray::EntryInfo::ToString = &lt;no type information&gt;
+6eb49e52          jscript9!Js::JavascriptArray::GetEnumerator (&lt;no parameter info&gt;)
+6ecd5430          jscript9!Js::JavascriptArray::EntryInfo::Reverse = &lt;no type information&gt;
+6eb66c77          jscript9!Js::JavascriptArray::EntryIndexOf (&lt;no parameter info&gt;)
+6eb93fa5          jscript9!Js::JavascriptArray::EntryEvery (&lt;no parameter info&gt;)
+6ecd53e0          jscript9!Js::JavascriptArray::EntryInfo::IsArray = &lt;no type information&gt;
+6ec31e6d          jscript9!Js::JavascriptArray::JoinOtherHelper (&lt;no parameter info&gt;)
+6ec31d73          jscript9!Js::JavascriptArray::sort (&lt;no parameter info&gt;)
+6eb94d8c          jscript9!Js::JavascriptArray::EntryFilter (&lt;no parameter info&gt;)
+6ec32052          jscript9!Js::JavascriptArray::EntryToLocaleString (&lt;no parameter info&gt;)
+6ec61e52          jscript9!Js::JavascriptArray::IsConfigurable (&lt;no parameter info&gt;)
+6ecd5410          jscript9!Js::JavascriptArray::EntryInfo::Join = &lt;no type information&gt;
+6ec31d56          jscript9!Js::JavascriptArray::CompareElements (&lt;no parameter info&gt;)
+6eb5f989          jscript9!Js::JavascriptArray::InternalCopyArrayElements&lt;unsigned int&gt; (&lt;no parameter info&gt;)
+6eaef6d1          jscript9!Js::JavascriptArray::IsItemEnumerable (&lt;no parameter info&gt;)
+6eb9d4cb          jscript9!Js::JavascriptArray::EntrySplice (&lt;no parameter info&gt;)
+6eacf7f0          jscript9!Js::JavascriptArray::EntryToString (&lt;no parameter info&gt;)
+6eb5f956          jscript9!Js::JavascriptArray::CopyArrayElements (&lt;no parameter info&gt;)
+6ec325e0          jscript9!Js::JavascriptArray::PrepareDetach (&lt;no parameter info&gt;)
+6ecd53f0          jscript9!Js::JavascriptArray::EntryInfo::Push = &lt;no type information&gt;
+6ec30a8b          jscript9!Js::JavascriptArray::ObjectSpliceHelper&lt;Js::JavascriptArray::BigIndex&gt; (&lt;no parameter info&gt;)
+6ec301f7          jscript9!Js::JavascriptArray::DirectSetItemIfNotExist (&lt;no parameter info&gt;)
+6ec30083          jscript9!Js::JavascriptArray::SetWritable (&lt;no parameter info&gt;)
+6ec30019          jscript9!Js::JavascriptArray::SetConfigurable (&lt;no parameter info&gt;)
+6ec31b1d          jscript9!Js::JavascriptArray::BigIndex::operator++ (&lt;no parameter info&gt;)
+6ecd54b0          jscript9!Js::JavascriptArray::EntryInfo::IndexOf = &lt;no type information&gt;
+6eba1498          jscript9!Js::JavascriptArray::EntryPush (&lt;no parameter info&gt;)
+6ecd5460          jscript9!Js::JavascriptArray::EntryInfo::Sort = &lt;no type information&gt;
+6ec2fcbb          jscript9!Js::JavascriptArray::SetItemAttributes (&lt;no parameter info&gt;)
+6ea8497f          jscript9!Js::JavascriptArray::ArrayElementEnumerator::Init (&lt;no parameter info&gt;)
+6ecd5350          jscript9!Js::JavascriptArray::EntryInfo::NewInstance = &lt;no type information&gt;
+6eac0596          jscript9!Js::JavascriptArray::EntryPop (&lt;no parameter info&gt;)
+6ea82f23          jscript9!Js::JavascriptArray::GetItem (&lt;no parameter info&gt;)
+6ec2ffb1          jscript9!Js::JavascriptArray::SetAttributes (&lt;no parameter info&gt;)
+6eae718b          jscript9!Js::JavascriptArray::GetItemReference (&lt;no parameter info&gt;)
+6ec2fd46          jscript9!Js::JavascriptArray::GetDiagTypeString (&lt;no parameter info&gt;)
+6eb61889          jscript9!Js::JavascriptArray::DeleteItem (&lt;no parameter info&gt;)
+6ecd5450          jscript9!Js::JavascriptArray::EntryInfo::Slice = &lt;no type information&gt;
+6ec319be          jscript9!Js::JavascriptArray::BigIndex::SetItemIfNotExist (&lt;no parameter info&gt;)
+6ecd5530          jscript9!Js::JavascriptArray::EntryInfo::Some = &lt;no type information&gt;
+6eb16a13          jscript9!Js::JavascriptArray::EntryJoin (&lt;no parameter info&gt;)
+6ecd5470          jscript9!Js::JavascriptArray::EntryInfo::Splice = &lt;no type information&gt;
+6ec2fc89          jscript9!Js::JavascriptArray::SetItemAccessors (&lt;no parameter info&gt;)
+6ec2ff1d          jscript9!Js::JavascriptArray::Seal (&lt;no parameter info&gt;)
+6eb5b713          jscript9!Js::JavascriptArray::GetItemSetter (&lt;no parameter info&gt;)
+6eb49dc0          jscript9!Js::JavascriptArray::GetEnumerator (&lt;no parameter info&gt;)
+6ec30284          jscript9!Js::JavascriptArray::InternalCopyArrayElements&lt;Js::JavascriptArray::BigIndex&gt; (&lt;no parameter info&gt;)
+6ec318bb          jscript9!Js::JavascriptArray::BigIndex::DeleteItem (&lt;no parameter info&gt;)
+6eb94158          jscript9!Js::JavascriptArray::EntryLastIndexOf (&lt;no parameter info&gt;)
+6eba4b06          jscript9!Js::JavascriptArray::NewInstance (&lt;no parameter info&gt;)  &lt;-------------------------
+6ecd5520          jscript9!Js::JavascriptArray::EntryInfo::ReduceRight = &lt;no type information&gt;
+6ecd54e0          jscript9!Js::JavascriptArray::EntryInfo::ForEach = &lt;no type information&gt;
+6ec31d27          jscript9!Js::JavascriptArray::EnforceCompatModeRestrictions (&lt;no parameter info&gt;)
+6ecd5440          jscript9!Js::JavascriptArray::EntryInfo::Shift = &lt;no type information&gt;
+6eab5de1          jscript9!Js::JavascriptArray::SetProperty (&lt;no parameter info&gt;)
+6ecd5400          jscript9!Js::JavascriptArray::EntryInfo::Concat = &lt;no type information&gt;
+6ea5b329          jscript9!Js::JavascriptArray::GetProperty (&lt;no parameter info&gt;)
+6ec2ff43          jscript9!Js::JavascriptArray::SetAccessors (&lt;no parameter info&gt;)
+6ec2fcea          jscript9!Js::JavascriptArray::SetItemWithAttributes (&lt;no parameter info&gt;)
+6ea4768d          jscript9!Js::JavascriptArray::IsObjectArrayFrozen (&lt;no parameter info&gt;)
+6eae0c2c          jscript9!Js::JavascriptArray::GetNextIndex (&lt;no parameter info&gt;)
+6eab5c21          jscript9!Js::JavascriptArray::Is (&lt;no parameter info&gt;)
+6ec3177e          jscript9!Js::JavascriptArray::CopyArrayElements (&lt;no parameter info&gt;)
+6ec3251d          jscript9!Js::JavascriptArray::SetLength (&lt;no parameter info&gt;)
+6eb28b61          jscript9!Js::JavascriptArray::JavascriptArray (&lt;no parameter info&gt;)
+6eaeb83a          jscript9!Js::JavascriptArray::ArraySpliceHelper (&lt;no parameter info&gt;)
+6eac3a16          jscript9!Js::JavascriptArray::AllocateHead (&lt;no parameter info&gt;)
+6eaffed4          jscript9!Js::JavascriptArray::SetPropertyWithAttributes (&lt;no parameter info&gt;)
+6ead00ce          jscript9!Js::JavascriptArray::HasProperty (&lt;no parameter info&gt;)
+6ecd54d0          jscript9!Js::JavascriptArray::EntryInfo::Filter = &lt;no type information&gt;
+6ec3190f          jscript9!Js::JavascriptArray::BigIndex::SetItem (&lt;no parameter info&gt;)
+6eae60d3          jscript9!Js::JavascriptArray::EntryMap (&lt;no parameter info&gt;)
+6eb16a9c          jscript9!Js::JavascriptArray::JoinHelper (&lt;no parameter info&gt;)
+6ec31b46          jscript9!Js::JavascriptArray::BigIndex::ToNumber (&lt;no parameter info&gt;)
+6ea84a80          jscript9!Js::JavascriptArray::ArrayElementEnumerator::ArrayElementEnumerator (&lt;no parameter info&gt;)
+6ea8495b          jscript9!Js::JavascriptArray::IsAnyArrayTypeId (&lt;no parameter info&gt;)
+6ec2fd1c          jscript9!Js::JavascriptArray::GetSpecialNonEnumerablePropertyName (&lt;no parameter info&gt;)
+6ec31bd5          jscript9!Js::JavascriptArray::BigIndex::IsSmallIndex (&lt;no parameter info&gt;)
+6eba157a          jscript9!Js::JavascriptArray::EntryForEach (&lt;no parameter info&gt;)
+6ea83044          jscript9!Js::JavascriptArray::SetItem (&lt;no parameter info&gt;)
+6ec3050a          jscript9!Js::JavascriptArray::ToLocaleString&lt;Js::RecyclableObject&gt; (&lt;no parameter info&gt;)
+6ea534e0          jscript9!Js::JavascriptArray::DirectGetItemAt (&lt;no parameter info&gt;)
+6ecd5420          jscript9!Js::JavascriptArray::EntryInfo::Pop = &lt;no type information&gt;
+6ea59b2d          jscript9!Js::JavascriptArray::ForInLoop (&lt;no parameter info&gt;)
+6eafff78          jscript9!Js::JavascriptArray::GetSetter (&lt;no parameter info&gt;)
+6eb4ec30          jscript9!Js::JavascriptArray::ArraySegmentSpliceHelper (&lt;no parameter info&gt;)
+6eb78e45          jscript9!Js::JavascriptArray::EntryReduce (&lt;no parameter info&gt;)
+6eb6697d          jscript9!Js::JavascriptArray::DirectGetItemAtFull (&lt;no parameter info&gt;)
+6ec32167          jscript9!Js::JavascriptArray::EntryReduceRight (&lt;no parameter info&gt;)
+6eba717f          jscript9!Js::JavascriptArray::EntryShift (&lt;no parameter info&gt;)
+6eb99706          jscript9!Js::JavascriptArray::MarshalToScriptContext (&lt;no parameter info&gt;)
+6ecd54c0          jscript9!Js::JavascriptArray::EntryInfo::Every = &lt;no type information&gt;
+6ec3196b          jscript9!Js::JavascriptArray::BigIndex::DeleteItem (&lt;no parameter info&gt;)
+6eb7c0ba          jscript9!Js::JavascriptArray::PreventExtensions (&lt;no parameter info&gt;)
+6ecd5480          jscript9!Js::JavascriptArray::EntryInfo::ToLocaleString = &lt;no type information&gt;
+6eb93f8b          jscript9!Js::JavascriptArray::DeleteProperty (&lt;no parameter info&gt;)
+6ec303b9          jscript9!Js::JavascriptArray::Unshift&lt;unsigned int&gt; (&lt;no parameter info&gt;)
+6ea849d5          jscript9!Js::JavascriptArray::FillFromPrototypes (&lt;no parameter info&gt;)
+6ea5b3cf          jscript9!Js::JavascriptArray::GetPropertyReference (&lt;no parameter info&gt;)
+6ec317e1          jscript9!Js::JavascriptArray::TruncateToProperties (&lt;no parameter info&gt;)
+6eabfc81          jscript9!Js::JavascriptArray::EntrySlice (&lt;no parameter info&gt;)
+6eae20b0          jscript9!Js::JavascriptArray::JoinToString (&lt;no parameter info&gt;)
+6ec30ca8          jscript9!Js::JavascriptArray::ConcatArgs&lt;Js::JavascriptArray::BigIndex&gt; (&lt;no parameter info&gt;)
+6ea5c2be          jscript9!Js::JavascriptArray::OP_NewScArray (&lt;no parameter info&gt;)
+6eb1682e          jscript9!Js::JavascriptArray::JoinArrayHelper (&lt;no parameter info&gt;)
+6ec31f63          jscript9!Js::JavascriptArray::GetFromLastIndex (&lt;no parameter info&gt;)
+6eb618a1          jscript9!Js::JavascriptArray::DirectDeleteItemAt (&lt;no parameter info&gt;)
+6ead497d          jscript9!Js::JavascriptArray::MakeCopyOnWriteObject (&lt;no parameter info&gt;)
+6eb4c512          jscript9!Js::JavascriptArray::EnsureHeadStartsFromZero (&lt;no parameter info&gt;)
+6ec31c24          jscript9!Js::JavascriptArray::ToLocaleStringHelper (&lt;no parameter info&gt;)
+6eae0be6          jscript9!Js::JavascriptArray::GetBeginLookupSegment (&lt;no parameter info&gt;)
+6ecd54a0          jscript9!Js::JavascriptArray::EntryInfo::Unshift = &lt;no type information&gt;</pre><p>This line looks promising:</p><pre class="ignore:true">6eba4b06          jscript9!Js::JavascriptArray::NewInstance (&lt;no parameter info&gt;)</pre><p>Let’s put a breakpoint on it and let’s see if this time we’re lucky.</p><pre class="ignore:true">0:006&gt; bc *
+0:006&gt; bp jscript9!Js::JavascriptArray::NewInstance</pre><p>Close the dialog box in IE, reload the page and close the starting dialog. This time everything goes according to plans:</p><p>
+<a href="images/pic_11.png"><img src="images/pic_11.png" alt="pic_11" width="1710" height="937"></a>
+</p><p>By stepping through the code we get to the following piece of code:</p><pre class="ignore:true">6eb02a3c 682870a46e      push    offset jscript9!Recycler::Alloc (6ea47028)
+6eb02a41 ff770c          push    dword ptr [edi+0Ch]
+6eb02a44 6a20            push    20h
+6eb02a46 e84546f4ff      call    jscript9!operator new&lt;Recycler&gt; (6ea47090)     &lt;-------------------
+6eb02a4b 8bf0            mov     esi,eax   &lt;--------- ESI = allocated block
+6eb02a4d 83c40c          add     esp,0Ch
+6eb02a50 85f6            test    esi,esi
+6eb02a52 0f841d210a00    je      jscript9!Js::JavascriptArray::NewInstance+0x390 (6eba4b75)
+6eb02a58 8b8f00010000    mov     ecx,dword ptr [edi+100h]
+6eb02a5e 894e04          mov     dword ptr [esi+4],ecx
+6eb02a61 c706b02fa46e    mov     dword ptr [esi],offset jscript9!Js::DynamicObject::`vftable' (6ea42fb0)
+6eb02a67 c7460800000000  mov     dword ptr [esi+8],0
+6eb02a6e c7460c01000000  mov     dword ptr [esi+0Ch],1
+6eb02a75 8b4118          mov     eax,dword ptr [ecx+18h]
+6eb02a78 8a4005          mov     al,byte ptr [eax+5]</pre><p>The operator new is called as follows:</p><pre class="ignore:true">operator new(20h, arg, jscript9!Recycler::Alloc);</pre><p>Let’s look at the code of the <span style="color: #00ff00;">operator new</span>:</p><pre class="ignore:true">jscript9!operator new&lt;Recycler&gt;:
+6ea47090 8bff            mov     edi,edi
+6ea47092 55              push    ebp
+6ea47093 8bec            mov     ebp,esp
+6ea47095 ff7508          push    dword ptr [ebp+8]      &lt;----- push 20h
+6ea47098 8b4d0c          mov     ecx,dword ptr [ebp+0Ch]
+6ea4709b ff5510          call    dword ptr [ebp+10h]    &lt;----- call jscript9!Recycler::Alloc
+6ea4709e 5d              pop     ebp
+6ea4709f c3              ret</pre><p>Let’s go back to the main code:</p><pre class="ignore:true">6eb02a3c 682870a46e      push    offset jscript9!Recycler::Alloc (6ea47028)
+6eb02a41 ff770c          push    dword ptr [edi+0Ch]
+6eb02a44 6a20            push    20h
+6eb02a46 e84546f4ff      call    jscript9!operator new&lt;Recycler&gt; (6ea47090)     &lt;-------------------
+6eb02a4b 8bf0            mov     esi,eax   &lt;--------- ESI = allocated block
+6eb02a4d 83c40c          add     esp,0Ch
+6eb02a50 85f6            test    esi,esi
+6eb02a52 0f841d210a00    je      jscript9!Js::JavascriptArray::NewInstance+0x390 (6eba4b75)
+6eb02a58 8b8f00010000    mov     ecx,dword ptr [edi+100h]
+6eb02a5e 894e04          mov     dword ptr [esi+4],ecx
+6eb02a61 c706b02fa46e    mov     dword ptr [esi],offset jscript9!Js::DynamicObject::`vftable' (6ea42fb0)
+6eb02a67 c7460800000000  mov     dword ptr [esi+8],0
+6eb02a6e c7460c01000000  mov     dword ptr [esi+0Ch],1
+6eb02a75 8b4118          mov     eax,dword ptr [ecx+18h]
+6eb02a78 8a4005          mov     al,byte ptr [eax+5]
+6eb02a7b a808            test    al,8
+6eb02a7d 0f85e8200a00    jne     jscript9!Js::JavascriptArray::NewInstance+0x386 (6eba4b6b)
+6eb02a83 b803000000      mov     eax,3
+6eb02a88 89460c          mov     dword ptr [esi+0Ch],eax
+6eb02a8b 8b4104          mov     eax,dword ptr [ecx+4] ds:002b:060e9a64=060fb000
+6eb02a8e 8b4004          mov     eax,dword ptr [eax+4]
+6eb02a91 8b4918          mov     ecx,dword ptr [ecx+18h]
+6eb02a94 8bb864040000    mov     edi,dword ptr [eax+464h]
+6eb02a9a 8b01            mov     eax,dword ptr [ecx]
+6eb02a9c ff5014          call    dword ptr [eax+14h]
+6eb02a9f 8b4e04          mov     ecx,dword ptr [esi+4]
+6eb02aa2 8b4918          mov     ecx,dword ptr [ecx+18h]
+6eb02aa5 8b4908          mov     ecx,dword ptr [ecx+8]
+6eb02aa8 3bc1            cmp     eax,ecx
+6eb02aaa 0f8f0d9f1900    jg      jscript9!memset+0x31562 (6ec9c9bd)
+6eb02ab0 8b4604          mov     eax,dword ptr [esi+4]
+6eb02ab3 c7063025a46e    mov     dword ptr [esi],offset jscript9!Js::JavascriptArray::`vftable' (6ea42530)
+6eb02ab9 c7461c00000000  mov     dword ptr [esi+1Ch],0
+6eb02ac0 8b4004          mov     eax,dword ptr [eax+4]</pre><p>The important instruction is</p><pre class="ignore:true">6eb02ab3 c7063025a46e    mov     dword ptr [esi],offset jscript9!Js::JavascriptArray::`vftable' (6ea42530)</pre><p>which overwrites the first dword of the block of memory with the vftable of a <span style="color: #00ff00;">JavascriptArray</span>.</p><p>Then another important part of code follows:</p><pre class="ignore:true">6eb02ac3 8b4004          mov     eax,dword ptr [eax+4]
+6eb02ac6 8b8864040000    mov     ecx,dword ptr [eax+464h]
+6eb02acc 6a50            push    50h        &lt;------- 50h bytes?
+6eb02ace c7461000000000  mov     dword ptr [esi+10h],0
+6eb02ad5 e80769f4ff      call    jscript9!Recycler::AllocZero (6ea493e1)    &lt;------ allocates a block
+6eb02ada c70000000000    mov     dword ptr [eax],0
+6eb02ae0 c7400400000000  mov     dword ptr [eax+4],0
+6eb02ae7 c7400810000000  mov     dword ptr [eax+8],10h
+6eb02aee c7400c00000000  mov     dword ptr [eax+0Ch],0
+6eb02af5 894618          mov     dword ptr [esi+18h],eax   &lt;------ look at the following picture
+6eb02af8 894614          mov     dword ptr [esi+14h],eax   &lt;------ look at the following picture
+6eb02afb e951200a00      jmp     jscript9!Js::JavascriptArray::NewInstance+0x24f (6eba4b51)</pre><p>The following picture shows what happens in the piece of code above:</p><p>
+<a href="images/pic_12b.png"><img src="images/pic_12b.png" alt="pic_12b" width="1710" height="928"></a>
+</p><p>Now we have two important addresses:</p><pre class="ignore:true">239d9340          address of the JavascriptArray
+2c1460a0          structure pointed to by the JavascriptArray</pre><p>Let’s delete the breakpoint and resume program execution. When the <span style="color: #00ff00;">Done</span> dialog box pops up, go back to WinDbg. Now break the execution in WinDbg and have another look at the address <span style="color: #00ff00;">239d9340h</span>:</p><p>
+<a href="images/pic_13.png"><img src="images/pic_13.png" alt="pic_13" width="1710" height="928"></a>
+</p><p>As we can see, now our <span style="color: #00ff00;">JavascriptArray</span> (at offsets <span style="color: #00ff00;">0x14</span> and <span style="color: #00ff00;">0x18</span>) points to a different address. Because a <span style="color: #00ff00;">JavascriptArray</span> is growable, it’s likely that when a bigger buffer is allocated the two pointers at <span style="color: #00ff00;">0x14</span> and <span style="color: #00ff00;">0x18</span> are updated to refer to the new buffer. We can also see that the <span style="color: #00ff00;">JavascriptArray</span> at <span style="color: #00ff00;">239d9340</span> corresponds to the array <span style="color: #00ff00;">a</span> in the javascript code. Indeed, it contains <span style="color: #00ff00;">10000h</span> references to other arrays.</p><p>We saw that the <span style="color: #00ff00;">JavascriptArray</span> object is allocated in <span style="color: #00ff00;">jscript9!Js::JavascriptArray::NewInstance</span>:</p><pre class="ignore:true">6eb02a46 e84546f4ff      call    jscript9!operator new&lt;Recycler&gt; (6ea47090)     &lt;-------------------
+6eb02a4b 8bf0            mov     esi,eax   &lt;--------- ESI = allocated block</pre><p>If at this point we return from <span style="color: #00ff00;">jscript9!Js::JavascriptArray::NewInstance</span> by pressing <span style="color: #00ff00;">Shift+F11</span>, we see the following code:</p><pre class="ignore:true">6ea125cc ff75ec          push    dword ptr [ebp-14h]
+6ea125cf ff75e8          push    dword ptr [ebp-18h]
+6ea125d2 ff55e4          call    dword ptr [ebp-1Ch]   (jscript9!Js::JavascriptArray::NewInstance)
+6ea125d5 8b65e0          mov     esp,dword ptr [ebp-20h] ss:002b:04d2c0e0=04d2c0c4</pre><p>After the call to <span style="color: #00ff00;">NewInstance</span>, <span style="color: #00ff00;">EAX</span> points to the <span style="color: #00ff00;">JavascriptArray</span> structure. So, we can put a breakpoint either at <span style="color: #00ff00;">6eb02a4b</span> or at <span style="color: #00ff00;">6ea125d5</span>. Let’s choose the latter:</p><pre class="ignore:true"> bp jscript9+425d5 ".printf \"new Array: addr = 0x%p\\n\",eax;g"</pre><p>Here’s what we discovered so far:</p><p>
+<a href="images/pic_14.png"><img src="images/pic_14.png" alt="pic_14" width="1111" height="662"></a>
+</p><h3>LargeHeapBlock</h3><p>What is a <span style="color: #00ff00;">LargeHeapBlock</span>? Let’s try to find some related symbols:</p><pre class="ignore:true">0:007&gt; x jscript9!*largeheapblock*
+6f696af3          jscript9!HeapInfo::DeleteLargeHeapBlockList (&lt;no parameter info&gt;)
+6f5d654d          jscript9!HeapInfo::ReinsertLargeHeapBlock (&lt;no parameter info&gt;)
+6f6a8699          jscript9!LargeHeapBlock::SweepObjects&lt;2&gt; (&lt;no parameter info&gt;)
+6f6ab0cf          jscript9!LargeHeapBlock::IsValidObject (&lt;no parameter info&gt;)
+6f6a82a8          jscript9!LargeHeapBlock::SweepObjects&lt;1&gt; (&lt;no parameter info&gt;)
+6f755d4d          jscript9!LargeHeapBlock::GetHeader (&lt;no parameter info&gt;)
+6f5a160e          jscript9!LargeHeapBlock::ResetMarks (&lt;no parameter info&gt;)
+6f5a0672          jscript9!LargeHeapBlock::Rescan (&lt;no parameter info&gt;)
+6f59f32f          jscript9!LargeHeapBlock::IsObjectMarked (&lt;no parameter info&gt;)
+6f59a7ca          jscript9!HeapInfo::AddLargeHeapBlock (&lt;no parameter info&gt;)    &lt;------------------------
+6f657a87          jscript9!LargeHeapBlock::AddObjectToFreeList (&lt;no parameter info&gt;)
+6f755f80          jscript9!LargeHeapBlock::Alloc (&lt;no parameter info&gt;)    &lt;--------------------------
+6f755dba          jscript9!LargeHeapBlock::GetObjectHeader (&lt;no parameter info&gt;)
+6f755b43          jscript9!HeapBucket::EnumerateObjects&lt;LargeHeapBlock&gt; (&lt;no parameter info&gt;)
+6f755daf          jscript9!LargeHeapBlock::GetRealAddressFromInterior (&lt;no parameter info&gt;)
+6f755dee          jscript9!LargeHeapBlock::SetMemoryProfilerOldObjectBit (&lt;no parameter info&gt;)
+6f755d9b          jscript9!LargeHeapBlock::GetObjectSize (&lt;no parameter info&gt;)
+6f5a096b          jscript9!HeapInfo::Rescan&lt;LargeHeapBlock&gt; (&lt;no parameter info&gt;)
+6f696b24          jscript9!LargeHeapBlock::ReleasePagesShutdown (&lt;no parameter info&gt;)
+6f755e23          jscript9!LargeHeapBlock::SetObjectMarkedBit (&lt;no parameter info&gt;)
+6f755eaf          jscript9!LargeHeapBlock::FinalizeObjects (&lt;no parameter info&gt;)
+6f59ef52          jscript9!LargeHeapBlock::SweepObjects&lt;0&gt; (&lt;no parameter info&gt;)
+6f755e66          jscript9!LargeHeapBlock::TestObjectMarkedBit (&lt;no parameter info&gt;)
+6f755daf          jscript9!LargeHeapBlock::MarkInterior (&lt;no parameter info&gt;)
+6f596e18          jscript9!LargeHeapBlock::`vftable' = &lt;no type information&gt;</pre><p>Here are the most promising functions:</p><pre class="ignore:true">6f59a7ca          jscript9!HeapInfo::AddLargeHeapBlock (&lt;no parameter info&gt;)
+6f755f80          jscript9!LargeHeapBlock::Alloc (&lt;no parameter info&gt;)</pre><p>Let’s put a breakpoint on both of them and reload the page in IE. When we close the <span style="color: #00ff00;">Start</span> dialog box, the first breakpoint is triggered and we end up here:</p><pre class="ignore:true">6f59a7c5 90              nop
+6f59a7c6 90              nop
+6f59a7c7 90              nop
+6f59a7c8 90              nop
+6f59a7c9 90              nop
+jscript9!HeapInfo::AddLargeHeapBlock:
+6f59a7ca 8bff            mov     edi,edi     &lt;------------ we are here
+6f59a7cc 55              push    ebp
+6f59a7cd 8bec            mov     ebp,esp
+6f59a7cf 83ec1c          sub     esp,1Ch
+6f59a7d2 53              push    ebx
+6f59a7d3 56              push    esi
+6f59a7d4 8b750c          mov     esi,dword ptr [ebp+0Ch]</pre><p>Let’s also look at the stack trace:</p><pre class="ignore:true">0:007&gt; k 10
+ChildEBP RetAddr  
+04dbbc90 6f59a74d jscript9!HeapInfo::AddLargeHeapBlock
+04dbbcb4 6f5a72d8 jscript9!Recycler::LargeAlloc+0x66
+04dbbcd0 6f652c47 jscript9!Recycler::AllocZero+0x91
+04dbbd10 6f5d2aae jscript9!Js::JavascriptArray::DirectSetItem_Full+0x3fd
+04dbbd98 6f5fed13 jscript9!Js::JavascriptOperators::OP_SetElementI+0x1e0
+04dbbf34 6f5a5cf5 jscript9!Js::InterpreterStackFrame::Process+0x3579
+04dbc084 03fd0fe9 jscript9!Js::InterpreterStackFrame::InterpreterThunk&lt;1&gt;+0x305
+WARNING: Frame IP not in any known module. Following frames may be wrong.
+04dbc090 6f5a1f60 0x3fd0fe9
+04dbc110 6f5a20ca jscript9!Js::JavascriptFunction::CallRootFunction+0x140
+04dbc128 6f5a209f jscript9!Js::JavascriptFunction::CallRootFunction+0x19
+04dbc170 6f5a2027 jscript9!ScriptSite::CallRootFunction+0x40
+04dbc198 6f64df75 jscript9!ScriptSite::Execute+0x61
+04dbc224 6f64db57 jscript9!ScriptEngine::ExecutePendingScripts+0x1e9
+04dbc2ac 6f64e0b7 jscript9!ScriptEngine::ParseScriptTextCore+0x2ad
+04dbc300 6e2db60c jscript9!ScriptEngine::ParseScriptText+0x5b
+04dbc338 6e2d945d MSHTML!CActiveScriptHolder::ParseScriptText+0x42</pre><p>Very interesting! A <span style="color: #00ff00;">LargeHeapBlock</span> is created by <span style="color: #00ff00;">LargeAlloc</span> (called by <span style="color: #00ff00;">AllocZero</span>) when the first item of a <span style="color: #00ff00;">JavascriptArray</span> is assigned to. Let’s return from <span style="color: #00ff00;">AddLargeHeapBlock</span> by pressing <span style="color: #00ff00;">Shift+F11</span> and look at the memory pointed to by <span style="color: #00ff00;">EAX</span>:</p><pre class="ignore:true">0:007&gt; dd eax
+25fcbe80  6f596e18 00000003 046b1000 00000002
+25fcbe90  00000000 00000000 00000004 046b1000
+25fcbea0  046b3000 25fcbee0 00000000 00000000
+25fcbeb0  00000000 00000000 04222e98 00000000
+25fcbec0  00000000 00000000 00000000 00000004
+25fcbed0  00000000 00000000 734a1523 8c000000
+25fcbee0  6f596e18 00000003 046a6000 00000003
+25fcbef0  00000002 00000000 00000004 046a8820
+0:007&gt; ln poi(eax)
+(6f596e18)   jscript9!LargeHeapBlock::`vftable'   |  (6f596e3c)   jscript9!PageSegment::`vftable'
+Exact matches:
+    jscript9!LargeHeapBlock::`vftable' = &lt;no type information&gt;</pre><p>So, <span style="color: #00ff00;">EAX</span> points to the <span style="color: #00ff00;">LargeHeapBlock</span> just created. Let’s see if this block was allocated directly on the heap:</p><pre class="ignore:true">0:007&gt; !heap -p -a @eax
+    address 25fcbe80 found in
+    _HEAP @ 300000
+      HEAP_ENTRY Size Prev Flags    UserPtr UserSize - state
+        25fcbe78 000c 0000  [00]   25fcbe80    00054 - (busy)
+          jscript9!LargeHeapBlock::`vftable'</pre><p>Yes, it was! It’s size is <span style="color: #00ff00;">0x54</span> bytes and is preceded by an allocation header of <span style="color: #00ff00;">8</span> bytes (<span style="color: #00ff00;">UserPtr – HEAP_ENTRY == 8</span>). That’s all we need to know.</p><p>We can put a breakpoint right after the call to <span style="color: #00ff00;">AddLargeHeapBlock</span>:</p><pre class="ignore:true">bp jscript9!Recycler::LargeAlloc+0x66 ".printf \"new LargeHeapBlock: addr = 0x%p\\n\",eax;g"</pre><p>We should have a look at a <span style="color: #00ff00;">LargeHeapBlock</span>. First, let’s change the javascript code a bit so that fewer <span style="color: #00ff00;">LargeHeapBlock</span> are created:</p>
+          
+<pre><code class="language-html">&lt;html&gt;
+&lt;head&gt;
+&lt;script language="javascript"&gt;
+  alert("Start");
+  var a = new Array();
+  for (var i = 0; i &lt; 0x100; ++i) {     // &lt;------ just 0x100
+    a[i] = new Array(0x1000/4);
+    a[i][0] = 0x7fffffff;
+    a[i][1] = -2;
+    a[i][2] = 1.2345;
+    a[i][3] = document.createElement("div");
+  }
+  alert("Done");
+&lt;/script&gt;
+&lt;/head&gt;
+&lt;body&gt;
+&lt;/body&gt;
+&lt;/html&gt;
+</code></pre>
+
+<p>Set the breakpoint we just saw:</p><pre class="ignore:true">bp jscript9!Recycler::LargeAlloc+0x66 ".printf \"new LargeHeapBlock: addr = 0x%p\\n\",eax;g"</pre><p>Now reload the page in IE and close the first dialog box.</p><p>Your output should look similar to this:</p><pre class="ignore:true">new LargeHeapBlock: addr = 0x042a7368
+new LargeHeapBlock: addr = 0x042a73c8
+new LargeHeapBlock: addr = 0x042a7428
+new LargeHeapBlock: addr = 0x042a7488
+new LargeHeapBlock: addr = 0x042a74e8
+new LargeHeapBlock: addr = 0x042a7548
+new LargeHeapBlock: addr = 0x042a75a8
+new LargeHeapBlock: addr = 0x042a7608
+new LargeHeapBlock: addr = 0x042a7668
+new LargeHeapBlock: addr = 0x042a76c8
+new LargeHeapBlock: addr = 0x042a7728
+new LargeHeapBlock: addr = 0x042a7788
+new LargeHeapBlock: addr = 0x042a77e8
+new LargeHeapBlock: addr = 0x042a7848
+new LargeHeapBlock: addr = 0x042a78a8
+new LargeHeapBlock: addr = 0x042a7908
+new LargeHeapBlock: addr = 0x042a7968
+new LargeHeapBlock: addr = 0x042a79c8
+new LargeHeapBlock: addr = 0x042a7a28
+new LargeHeapBlock: addr = 0x042a7a88
+new LargeHeapBlock: addr = 0x042a7ae8
+new LargeHeapBlock: addr = 0x042a7b48
+new LargeHeapBlock: addr = 0x042a7ba8
+new LargeHeapBlock: addr = 0x042a7c08
+new LargeHeapBlock: addr = 0x042a7c68
+new LargeHeapBlock: addr = 0x042a7cc8
+new LargeHeapBlock: addr = 0x042a7d28
+new LargeHeapBlock: addr = 0x042a7d88
+new LargeHeapBlock: addr = 0x042a7de8
+new LargeHeapBlock: addr = 0x042a7e48
+new LargeHeapBlock: addr = 0x042a7ea8
+new LargeHeapBlock: addr = 0x042a7f08
+new LargeHeapBlock: addr = 0x042a7f68
+new LargeHeapBlock: addr = 0x042a7fc8
+new LargeHeapBlock: addr = 0x042a8028
+new LargeHeapBlock: addr = 0x042a8088
+new LargeHeapBlock: addr = 0x042a80e8
+new LargeHeapBlock: addr = 0x134a9020
+new LargeHeapBlock: addr = 0x134a9080
+new LargeHeapBlock: addr = 0x134a90e0
+new LargeHeapBlock: addr = 0x134a9140
+new LargeHeapBlock: addr = 0x134a91a0
+new LargeHeapBlock: addr = 0x134a9200
+new LargeHeapBlock: addr = 0x134a9260
+new LargeHeapBlock: addr = 0x134a92c0
+new LargeHeapBlock: addr = 0x134a9320
+new LargeHeapBlock: addr = 0x134a9380
+new LargeHeapBlock: addr = 0x134a93e0
+new LargeHeapBlock: addr = 0x134a9440
+new LargeHeapBlock: addr = 0x134a94a0
+new LargeHeapBlock: addr = 0x134a9500
+new LargeHeapBlock: addr = 0x134a9560
+new LargeHeapBlock: addr = 0x134a95c0
+new LargeHeapBlock: addr = 0x134a9620
+new LargeHeapBlock: addr = 0x134a9680
+new LargeHeapBlock: addr = 0x134a96e0
+new LargeHeapBlock: addr = 0x134a9740
+new LargeHeapBlock: addr = 0x134a97a0
+new LargeHeapBlock: addr = 0x134a9800
+new LargeHeapBlock: addr = 0x134a9860
+new LargeHeapBlock: addr = 0x134a98c0
+new LargeHeapBlock: addr = 0x134a9920
+new LargeHeapBlock: addr = 0x134a9980
+new LargeHeapBlock: addr = 0x134a99e0
+new LargeHeapBlock: addr = 0x134a9a40
+new LargeHeapBlock: addr = 0x134a9aa0
+new LargeHeapBlock: addr = 0x134a9b00
+new LargeHeapBlock: addr = 0x134a9b60
+new LargeHeapBlock: addr = 0x134a9bc0
+new LargeHeapBlock: addr = 0x134a9c20
+new LargeHeapBlock: addr = 0x134a9c80
+new LargeHeapBlock: addr = 0x134a9ce0
+new LargeHeapBlock: addr = 0x134a9d40
+new LargeHeapBlock: addr = 0x134a9da0
+new LargeHeapBlock: addr = 0x134a9e00
+new LargeHeapBlock: addr = 0x134a9e60
+new LargeHeapBlock: addr = 0x134a9ec0
+new LargeHeapBlock: addr = 0x134a9f20
+new LargeHeapBlock: addr = 0x134a9f80
+new LargeHeapBlock: addr = 0x1380e060
+new LargeHeapBlock: addr = 0x1380e0c0
+new LargeHeapBlock: addr = 0x1380e120
+new LargeHeapBlock: addr = 0x1380e180
+new LargeHeapBlock: addr = 0x1380e1e0
+new LargeHeapBlock: addr = 0x1380e240
+new LargeHeapBlock: addr = 0x1380e2a0
+new LargeHeapBlock: addr = 0x1380e300
+new LargeHeapBlock: addr = 0x1380e360
+new LargeHeapBlock: addr = 0x1380e3c0
+new LargeHeapBlock: addr = 0x1380e420
+new LargeHeapBlock: addr = 0x1380e480
+new LargeHeapBlock: addr = 0x1380e4e0
+new LargeHeapBlock: addr = 0x1380e540
+new LargeHeapBlock: addr = 0x1380e5a0
+new LargeHeapBlock: addr = 0x1380e600
+new LargeHeapBlock: addr = 0x1380e660
+new LargeHeapBlock: addr = 0x1380e6c0
+new LargeHeapBlock: addr = 0x1380e720
+new LargeHeapBlock: addr = 0x1380e780
+new LargeHeapBlock: addr = 0x1380e7e0
+new LargeHeapBlock: addr = 0x1380e840
+new LargeHeapBlock: addr = 0x1380e8a0
+new LargeHeapBlock: addr = 0x1380e900
+new LargeHeapBlock: addr = 0x1380e960
+new LargeHeapBlock: addr = 0x1380e9c0
+new LargeHeapBlock: addr = 0x1380ea20
+new LargeHeapBlock: addr = 0x1380ea80
+new LargeHeapBlock: addr = 0x1380eae0
+new LargeHeapBlock: addr = 0x1380eb40
+new LargeHeapBlock: addr = 0x1380eba0
+new LargeHeapBlock: addr = 0x1380ec00
+new LargeHeapBlock: addr = 0x1380ec60
+new LargeHeapBlock: addr = 0x1380ecc0
+new LargeHeapBlock: addr = 0x1380ed20
+new LargeHeapBlock: addr = 0x1380ed80
+new LargeHeapBlock: addr = 0x1380ede0
+new LargeHeapBlock: addr = 0x1380ee40
+new LargeHeapBlock: addr = 0x1380eea0
+new LargeHeapBlock: addr = 0x1380ef00
+new LargeHeapBlock: addr = 0x1380ef60
+new LargeHeapBlock: addr = 0x1380efc0
+new LargeHeapBlock: addr = 0x16ccb020
+new LargeHeapBlock: addr = 0x16ccb080
+new LargeHeapBlock: addr = 0x16ccb0e0
+new LargeHeapBlock: addr = 0x16ccb140
+new LargeHeapBlock: addr = 0x16ccb1a0
+new LargeHeapBlock: addr = 0x16ccb200
+new LargeHeapBlock: addr = 0x16ccb260
+new LargeHeapBlock: addr = 0x16ccb2c0
+new LargeHeapBlock: addr = 0x16ccb320
+new LargeHeapBlock: addr = 0x16ccb380
+new LargeHeapBlock: addr = 0x16ccb3e0
+new LargeHeapBlock: addr = 0x16ccb440
+new LargeHeapBlock: addr = 0x16ccb4a0
+new LargeHeapBlock: addr = 0x16ccb500
+new LargeHeapBlock: addr = 0x16ccb560
+new LargeHeapBlock: addr = 0x16ccb5c0
+new LargeHeapBlock: addr = 0x16ccb620
+new LargeHeapBlock: addr = 0x16ccb680
+new LargeHeapBlock: addr = 0x16ccb6e0
+new LargeHeapBlock: addr = 0x16ccb740
+new LargeHeapBlock: addr = 0x16ccb7a0
+new LargeHeapBlock: addr = 0x16ccb800
+new LargeHeapBlock: addr = 0x16ccb860
+new LargeHeapBlock: addr = 0x16ccb8c0
+new LargeHeapBlock: addr = 0x16ccb920
+new LargeHeapBlock: addr = 0x16ccb980
+new LargeHeapBlock: addr = 0x16ccb9e0
+new LargeHeapBlock: addr = 0x16ccba40
+new LargeHeapBlock: addr = 0x16ccbaa0
+new LargeHeapBlock: addr = 0x16ccbb00
+new LargeHeapBlock: addr = 0x16ccbb60
+new LargeHeapBlock: addr = 0x16ccbbc0
+new LargeHeapBlock: addr = 0x16ccbc20
+new LargeHeapBlock: addr = 0x16ccbc80
+new LargeHeapBlock: addr = 0x16ccbce0
+new LargeHeapBlock: addr = 0x16ccbd40
+new LargeHeapBlock: addr = 0x16ccbda0
+new LargeHeapBlock: addr = 0x16ccbe00
+new LargeHeapBlock: addr = 0x16ccbe60
+new LargeHeapBlock: addr = 0x16ccbec0
+new LargeHeapBlock: addr = 0x16ccbf20
+new LargeHeapBlock: addr = 0x16ccbf80
+new LargeHeapBlock: addr = 0x16ccc020
+new LargeHeapBlock: addr = 0x16ccc080
+new LargeHeapBlock: addr = 0x16ccc0e0
+new LargeHeapBlock: addr = 0x16ccc140
+new LargeHeapBlock: addr = 0x16ccc1a0
+new LargeHeapBlock: addr = 0x16ccc200
+new LargeHeapBlock: addr = 0x16ccc260
+new LargeHeapBlock: addr = 0x16ccc2c0
+new LargeHeapBlock: addr = 0x16ccc320
+new LargeHeapBlock: addr = 0x16ccc380
+new LargeHeapBlock: addr = 0x16ccc3e0
+new LargeHeapBlock: addr = 0x16ccc440
+new LargeHeapBlock: addr = 0x16ccc4a0
+new LargeHeapBlock: addr = 0x16ccc500
+new LargeHeapBlock: addr = 0x16ccc560
+new LargeHeapBlock: addr = 0x16ccc5c0
+new LargeHeapBlock: addr = 0x16ccc620
+new LargeHeapBlock: addr = 0x16ccc680
+new LargeHeapBlock: addr = 0x16ccc6e0
+new LargeHeapBlock: addr = 0x16ccc740
+new LargeHeapBlock: addr = 0x16ccc7a0
+new LargeHeapBlock: addr = 0x16ccc800
+new LargeHeapBlock: addr = 0x16ccc860
+new LargeHeapBlock: addr = 0x16ccc8c0
+new LargeHeapBlock: addr = 0x16ccc920
+new LargeHeapBlock: addr = 0x16ccc980
+new LargeHeapBlock: addr = 0x16ccc9e0
+new LargeHeapBlock: addr = 0x16ccca40
+new LargeHeapBlock: addr = 0x16cccaa0
+new LargeHeapBlock: addr = 0x16cccb00
+new LargeHeapBlock: addr = 0x16cccb60
+new LargeHeapBlock: addr = 0x16cccbc0
+new LargeHeapBlock: addr = 0x16cccc20
+new LargeHeapBlock: addr = 0x16cccc80
+new LargeHeapBlock: addr = 0x16cccce0
+new LargeHeapBlock: addr = 0x16cccd40
+new LargeHeapBlock: addr = 0x16cccda0
+new LargeHeapBlock: addr = 0x16ccce00
+new LargeHeapBlock: addr = 0x16ccce60
+new LargeHeapBlock: addr = 0x16cccec0
+new LargeHeapBlock: addr = 0x16cccf20
+new LargeHeapBlock: addr = 0x16cccf80
+new LargeHeapBlock: addr = 0x1364e060
+new LargeHeapBlock: addr = 0x1364e0c0
+new LargeHeapBlock: addr = 0x1364e120
+new LargeHeapBlock: addr = 0x1364e180
+new LargeHeapBlock: addr = 0x1364e1e0
+new LargeHeapBlock: addr = 0x1364e240
+new LargeHeapBlock: addr = 0x1364e2a0
+new LargeHeapBlock: addr = 0x1364e300
+new LargeHeapBlock: addr = 0x1364e360
+new LargeHeapBlock: addr = 0x1364e3c0
+new LargeHeapBlock: addr = 0x1364e420
+new LargeHeapBlock: addr = 0x1364e480
+new LargeHeapBlock: addr = 0x1364e4e0
+new LargeHeapBlock: addr = 0x1364e540
+new LargeHeapBlock: addr = 0x1364e5a0
+new LargeHeapBlock: addr = 0x1364e600
+new LargeHeapBlock: addr = 0x1364e660
+new LargeHeapBlock: addr = 0x1364e6c0
+new LargeHeapBlock: addr = 0x1364e720
+new LargeHeapBlock: addr = 0x1364e780
+new LargeHeapBlock: addr = 0x1364e7e0
+new LargeHeapBlock: addr = 0x1364e840
+new LargeHeapBlock: addr = 0x1364e8a0
+new LargeHeapBlock: addr = 0x1364e900
+new LargeHeapBlock: addr = 0x1364e960
+new LargeHeapBlock: addr = 0x1364e9c0
+new LargeHeapBlock: addr = 0x1364ea20
+new LargeHeapBlock: addr = 0x1364ea80
+new LargeHeapBlock: addr = 0x1364eae0
+new LargeHeapBlock: addr = 0x1364eb40
+new LargeHeapBlock: addr = 0x1364eba0
+new LargeHeapBlock: addr = 0x1364ec00
+new LargeHeapBlock: addr = 0x1364ec60
+new LargeHeapBlock: addr = 0x1364ecc0
+new LargeHeapBlock: addr = 0x1364ed20
+new LargeHeapBlock: addr = 0x1364ed80
+new LargeHeapBlock: addr = 0x1364ede0
+new LargeHeapBlock: addr = 0x1364ee40
+new LargeHeapBlock: addr = 0x1364eea0
+new LargeHeapBlock: addr = 0x1364ef00
+new LargeHeapBlock: addr = 0x1364ef60
+new LargeHeapBlock: addr = 0x1364efc0
+new LargeHeapBlock: addr = 0x1364f060
+new LargeHeapBlock: addr = 0x1364f0c0
+new LargeHeapBlock: addr = 0x1364f120
+new LargeHeapBlock: addr = 0x1364f180
+new LargeHeapBlock: addr = 0x1364f1e0
+new LargeHeapBlock: addr = 0x1364f240
+new LargeHeapBlock: addr = 0x1364f2a0
+new LargeHeapBlock: addr = 0x1364f300
+new LargeHeapBlock: addr = 0x1364f360
+new LargeHeapBlock: addr = 0x1364f3c0</pre><p>Let’s look at the last 6 addresses:</p><pre class="ignore:true">new LargeHeapBlock: addr = 0x1364f1e0
+new LargeHeapBlock: addr = 0x1364f240
+new LargeHeapBlock: addr = 0x1364f2a0
+new LargeHeapBlock: addr = 0x1364f300
+new LargeHeapBlock: addr = 0x1364f360
+new LargeHeapBlock: addr = 0x1364f3c0</pre><p>First of all, note that they’re <span style="color: #00ff00;">0x60</span> bytes apart: <span style="color: #00ff00;">0x8</span> bytes for the allocation header and <span style="color: #00ff00;">0x58</span> bytes for the <span style="color: #00ff00;">LargeHeapBlock</span> object. Here are the last 6 <span style="color: #00ff00;">LargeHeapBlocks</span> in memory:</p><p>
+<a href="images/pic_15.png"><img src="images/pic_15.png" alt="pic_15" width="998" height="587"></a>
+</p><p>As we can see, each <span style="color: #00ff00;">LargeHeapBlock</span> contains, af offset <span style="color: #00ff00;">0x24</span>, a pointer to the previous <span style="color: #00ff00;">LargeHeapBlock</span>. This pointer will be used later to determine the address of the <span style="color: #00ff00;">LeageHeapBlock</span> itself.</p><h3>ArrayBuffer &amp; Int32Array</h3><p>Here’s what the <span style="color: #00ccff;">MDN</span> (<span style="color: #00ccff;">M</span>ozilla <span style="color: #00ccff;">D</span>eveloper <span style="color: #00ccff;">N</span>etwork) says about <span style="color: #00ff00;">ArrayBuffer</span>:</p><blockquote><p>The <span style="color: #00ff00;">ArrayBuffer</span> object is used to represent a generic, fixed-length raw binary data buffer. You can not directly manipulate the contents of an <span style="color: #00ff00;">ArrayBuffer</span>; instead, you create one of the typed array objects or a <span style="color: #00ff00;">DataView</span> object which represents the buffer in a specific format, and use that to read and write the contents of the buffer.</p></blockquote><p>Consider the following example:</p>
+
+<pre><code class="language-js">// This creates an ArrayBuffer manually.
+buf = new ArrayBuffer(400*1024*1024);
+a = new Int32Array(buf);
+
+// This creates an ArrayBuffer automatically.
+a2 = new Int32Array(100*1024*1024);
+</code></pre>
+
+<p>The arrays <span style="color: #00ff00;">a</span> and <span style="color: #00ff00;">a2</span> are equivalent and have the same length. When creating an <span style="color: #00ff00;">ArrayBuffer</span> directly we need to specify the size in bytes, whereas when creating an <span style="color: #00ff00;">Int32Array</span> we need to specify the length in number of elements (32-bit integers). Note that when we create an <span style="color: #00ff00;">Int32Array</span>, an <span style="color: #00ff00;">ArrayBuffer</span> is created internally and the <span style="color: #00ff00;">Int32Array</span> uses it.</p><p>To find out what code creates an <span style="color: #00ff00;">ArrayBuffer</span>, we can perform a heap spray like before. Let’s use the following javascript code:</p>
+
+<pre><code class="language-html">&lt;html&gt;
+&lt;head&gt;
+&lt;script language="javascript"&gt;
+  alert("Start");
+  var a = new Array();
+  for (var i = 0; i &lt; 0x10000; ++i) {
+    a[i] = new Int32Array(0x1000/4);
+    for (var j = 0; j &lt; a[i].length; ++j)
+      a[i][j] = 0x123;
+  }
+  alert("Done");
+&lt;/script&gt;
+&lt;/head&gt;
+&lt;body&gt;
+&lt;/body&gt;
+&lt;/html&gt;
+</code></pre>
+
+<p>When the dialog box with the text <span style="color: #00ff00;">Done</span> pops up, we can look at the memory with VMMap. Here’s what we see:</p><p>
+<a href="images/pic_16.png"><img src="images/pic_16.png" alt="pic_16" width="749" height="851"></a>
+<br> Note that this time it says <span style="color: #00ff00;">Heap (Private D …</span>, which means that the <span style="color: #00ff00;">ArrayBuffers</span> are allocated directly on the heap. If we look at the address <span style="color: #00ff00;">f650000</span> in WinDbg, we see this:</p><pre class="ignore:true">0f650000: 03964205 0101f3c5 ffeeffee 00000000 10620010 0e680010 00450000 0f650000
+0f650020: 00000fd0 0f650040 10620000 0000000f 00000001 00000000 10610ff0 10610ff0
+0f650040: 839ec20d 0801f3cd 0a73f528 0c6dcc48 00000012 f0e0d0c0 39682cf0 88000000
+0f650060: 00000123 00000123 00000123 00000123 00000123 00000123 00000123 00000123
+0f650080: 00000123 00000123 00000123 00000123 00000123 00000123 00000123 00000123
+0f6500a0: 00000123 00000123 00000123 00000123 00000123 00000123 00000123 00000123
+0f6500c0: 00000123 00000123 00000123 00000123 00000123 00000123 00000123 00000123
+0f6500e0: 00000123 00000123 00000123 00000123 00000123 00000123 00000123 00000123</pre><p>Our data begins at <span style="color: #00ff00;">f650060</span>. Since it’s on the heap, let’s use <span style="color: #00ff00;">!heap</span>:</p><pre class="ignore:true">0:012&gt; !heap -p -a f650060
+    address 0f650060 found in
+    _HEAP @ 450000
+      HEAP_ENTRY Size Prev Flags    UserPtr UserSize - state
+        0f650058 0201 0000  [00]   0f650060    01000 - (busy)</pre><p>As always, there are <span style="color: #00ff00;">8</span> bytes of allocation header. If we reload the page in IE and go back to WinDbg, we can see that the situation hasn’t changed:</p><pre class="ignore:true">0f650000: 03964205 0101f3c5 ffeeffee 00000000 10620010 0e680010 00450000 0f650000
+0f650020: 00000fd0 0f650040 10620000 000000cc 00000004 00000000 10310ff0 10610ff0
+0f650040: 839ec20d 0801f3cd 129e0158 11119048 00000012 f0e0d0c0 2185d880 88000000
+0f650060: 00000123 00000123 00000123 00000123 00000123 00000123 00000123 00000123
+0f650080: 00000123 00000123 00000123 00000123 00000123 00000123 00000123 00000123
+0f6500a0: 00000123 00000123 00000123 00000123 00000123 00000123 00000123 00000123
+0f6500c0: 00000123 00000123 00000123 00000123 00000123 00000123 00000123 00000123
+0f6500e0: 00000123 00000123 00000123 00000123 00000123 00000123 00000123 00000123</pre><p>This means that we could put a hardware breakpoint at the address <span style="color: #00ff00;">0f650058</span> (<span style="color: #00ff00;">HEAP_ENTRY</span> above) and break on the code which make the allocation on the heap. Reload the page in IE and set the breakpoint in WinDbg:</p><pre class="ignore:true">0:013&gt; ba w4 f650058</pre><p>After closing the dialog box in IE, we break here:</p><pre class="ignore:true">772179ff 331da4002e77    xor     ebx,dword ptr [ntdll!RtlpLFHKey (772e00a4)]
+77217a05 c6410780        mov     byte ptr [ecx+7],80h
+77217a09 33d8            xor     ebx,eax
+77217a0b 33de            xor     ebx,esi
+77217a0d ff4df4          dec     dword ptr [ebp-0Ch]
+77217a10 8919            mov     dword ptr [ecx],ebx
+77217a12 c60200          mov     byte ptr [edx],0           ds:002b:0f65005e=00  &lt;----------- we are here
+77217a15 75be            jne     ntdll!RtlpSubSegmentInitialize+0xe5 (772179d5)
+77217a17 8b5d08          mov     ebx,dword ptr [ebp+8]
+77217a1a 8b45f8          mov     eax,dword ptr [ebp-8]
+77217a1d baffff0000      mov     edx,0FFFFh
+77217a22 66895108        mov     word ptr [ecx+8],dx
+77217a26 668b4df0        mov     cx,word ptr [ebp-10h]
+77217a2a 66894e10        mov     word ptr [esi+10h],cx</pre><p>Here’s the stack trace:</p><pre class="ignore:true">0:004&gt; k 10
+ChildEBP RetAddr  
+057db90c 77216e87 ntdll!RtlpSubSegmentInitialize+0x122
+057db9a8 7720e0f2 ntdll!RtlpLowFragHeapAllocFromContext+0x882
+057dba1c 75de9d45 ntdll!RtlAllocateHeap+0x206
+057dba3c 6f7f4613 msvcrt!malloc+0x8d
+057dba4c 6f643cfa jscript9!memset+0x3a4c2
+057dba64 6f79fc00 jscript9!Js::JavascriptArrayBuffer::Create+0x3c   &lt;----------------
+057dba90 6f79af10 jscript9!Js::TypedArrayBase::CreateNewInstance+0x1cf   &lt;----------------
+057dbb08 6f5c7461 jscript9!Js::TypedArray&lt;int&gt;::NewInstance+0x55   &lt;----------------
+057dbca4 6f5a5cf5 jscript9!Js::InterpreterStackFrame::Process+0x4b47
+057dbdd4 04a70fe9 jscript9!Js::InterpreterStackFrame::InterpreterThunk&lt;1&gt;+0x305
+WARNING: Frame IP not in any known module. Following frames may be wrong.
+057dbde0 6f5a1f60 0x4a70fe9
+057dbe60 6f5a20ca jscript9!Js::JavascriptFunction::CallRootFunction+0x140
+057dbe78 6f5a209f jscript9!Js::JavascriptFunction::CallRootFunction+0x19
+057dbec0 6f5a2027 jscript9!ScriptSite::CallRootFunction+0x40
+057dbee8 6f64df75 jscript9!ScriptSite::Execute+0x61
+057dbf74 6f64db57 jscript9!ScriptEngine::ExecutePendingScripts+0x1e9</pre><p>Perfect! We see that the <span style="color: #00ff00;">ArrayBuffer</span> is allocated with a C’s <span style="color: #00ff00;">malloc</span>, which is called inside <span style="color: #00ff00;">jscript9!Js::JavascriptArrayBuffer::Create</span>. <span style="color: #00ff00;">TypedArray&lt;int&gt;</span> is probably our <span style="color: #00ff00;">Int32Array</span> and <span style="color: #00ff00;">TypedArrayBase</span> is its base class. So,<span style="color: #00ff00;"> jscript9!Js::TypedArray&lt;int&gt;::NewInstance</span> creates a new <span style="color: #00ff00;">Int32Array</span> and a new <span style="color: #00ff00;">JavascriptArrayBuffer</span>. Now we should have a look at an <span style="color: #00ff00;">Int32Array</span> in memory. We don’t need to spray the heap anymore, so let’s change the code:</p>
+
+<pre><code class="language-html">&lt;html&gt;
+&lt;head&gt;
+&lt;script language="javascript"&gt;
+  alert("Start");
+  a = new Int32Array(0x1000);
+  for (var j = 0; j &lt; a.length; ++j)
+    a[j] = 0x123;
+  alert("Done");
+&lt;/script&gt;
+&lt;/head&gt;
+&lt;body&gt;
+&lt;/body&gt;
+&lt;/html&gt;
+</code></pre>
+
+<p>Let’s put a breakpoint on the creation of a new <span style="color: #00ff00;">Int32Array</span>:</p><pre class="ignore:true">0:013&gt; bp jscript9!Js::TypedArray&lt;int&gt;::NewInstance
+Couldn't resolve error at 'jscript9!Js::TypedArray&lt;int&gt;::NewInstance'
+The breakpoint expression "jscript9!Js::TypedArray&lt;int&gt;::NewInstance" evaluates to the inline function.
+Please use bm command to set breakpoints instead of bp.</pre><p>Let’s try to use <span style="color: #00ff00;">bm</span> instead:</p><pre class="ignore:true">0:013&gt; bm jscript9!Js::TypedArray&lt;int&gt;::NewInstance
+  1: 6f79aebb          @!"jscript9!Js::TypedArray&lt;int&gt;::NewInstance"
+0:013&gt; bl
+ 1 e 6f79aebb     0001 (0001)  0:**** jscript9!Js::TypedArray&lt;int&gt;::NewInstance</pre><p>OK, it seems it worked. Now reload the page in IE. When we close the dialog box, we break on <span style="color: #00ff00;">jscript9!Js::TypedArray&lt;int&gt;::NewInstance</span>. Here’s the entire function:</p><pre class="ignore:true">0:004&gt; uf 6f79aebb
+jscript9!Js::TypedArray&lt;int&gt;::NewInstance:
+6f79aebb 8bff            mov     edi,edi
+6f79aebd 55              push    ebp
+6f79aebe 8bec            mov     ebp,esp
+6f79aec0 83e4f8          and     esp,0FFFFFFF8h
+6f79aec3 83ec0c          sub     esp,0Ch
+6f79aec6 53              push    ebx
+6f79aec7 8b5d08          mov     ebx,dword ptr [ebp+8]
+6f79aeca 8b4304          mov     eax,dword ptr [ebx+4]
+6f79aecd 8b4004          mov     eax,dword ptr [eax+4]
+6f79aed0 8b4804          mov     ecx,dword ptr [eax+4]
+6f79aed3 56              push    esi
+6f79aed4 57              push    edi
+6f79aed5 6a00            push    0
+6f79aed7 51              push    ecx
+6f79aed8 8b8934020000    mov     ecx,dword ptr [ecx+234h]
+6f79aede ba00040000      mov     edx,400h
+6f79aee3 e8b2e7e0ff      call    jscript9!ThreadContext::ProbeStack (6f5a969a)
+6f79aee8 8d4510          lea     eax,[ebp+10h]
+6f79aeeb 50              push    eax
+6f79aeec 8d7d0c          lea     edi,[ebp+0Ch]
+6f79aeef 8d742414        lea     esi,[esp+14h]
+6f79aef3 e8cb93e0ff      call    jscript9!Js::ArgumentReader::ArgumentReader (6f5a42c3)
+6f79aef8 8b4304          mov     eax,dword ptr [ebx+4]
+6f79aefb 8b4004          mov     eax,dword ptr [eax+4]
+6f79aefe 6850bd726f      push    offset jscript9!Js::TypedArray&lt;int&gt;::Create (6f72bd50)
+6f79af03 6a04            push    4
+6f79af05 ff7004          push    dword ptr [eax+4]
+6f79af08 8bc6            mov     eax,esi
+6f79af0a 50              push    eax
+6f79af0b e8214b0000      call    jscript9!Js::TypedArrayBase::CreateNewInstance (6f79fa31)
+6f79af10 5f              pop     edi
+6f79af11 5e              pop     esi
+6f79af12 5b              pop     ebx
+6f79af13 8be5            mov     esp,ebp
+6f79af15 5d              pop     ebp
+6f79af16 c3              ret</pre><p>By stepping inside <span style="color: #00ff00;">jscript9!Js::TypedArrayBase::CreateNewInstance</span> we come across a call to <span style="color: #00ff00;">jscript9!Js::TypedArray&lt;int&gt;::Create</span>:</p><pre class="ignore:true">6f79fc16 ffb608060000    push    dword ptr [esi+608h]
+6f79fc1c 57              push    edi
+6f79fc1d 51              push    ecx
+6f79fc1e 53              push    ebx
+6f79fc1f ff5514          call    dword ptr [ebp+14h]  ss:002b:057dba9c={jscript9!Js::TypedArray&lt;int&gt;::Create (6f72bd50)}</pre><p>If we step inside <span style="color: #00ff00;">jscript9!Js::TypedArray&lt;int&gt;::Create</span>, we get to a call to <span style="color: #00ff00;">Alloc</span>:</p><pre class="ignore:true">6f72bd88 8b7514          mov     esi,dword ptr [ebp+14h] ss:002b:057dba64=04b6b000
+6f72bd8b 8b4e0c          mov     ecx,dword ptr [esi+0Ch]
+6f72bd8e 6a24            push    24h      &lt;----------------- 24h bytes
+6f72bd90 e893b2e6ff      call    jscript9!Recycler::Alloc (6f597028)
+6f72bd95 ffb61c010000    push    dword ptr [esi+11Ch]
+6f72bd9b ff7510          push    dword ptr [ebp+10h]
+6f72bd9e ff750c          push    dword ptr [ebp+0Ch]
+6f72bda1 57              push    edi
+6f72bda2 50              push    eax
+6f72bda3 e898f7ffff      call    jscript9!Js::TypedArray&lt;int&gt;::TypedArray&lt;int&gt; (6f72b540)
+6f72bda8 5f              pop     edi
+6f72bda9 5e              pop     esi
+6f72bdaa c9              leave
+6f72bdab c21000          ret     10h</pre><p>We can see that the <span style="color: #00ff00;">TypedArray&lt;int&gt;</span> object is <span style="color: #00ff00;">24h</span> bytes. Note that the object is first allocated and then initialized by the constructor.</p><p>To print a message when an <span style="color: #00ff00;">Int32Array</span> is created, we can put a breakpoint at the end of <span style="color: #00ff00;">jscript9!Js::TypedArray&lt;int&gt;::NewInstance</span>, right after the call to <span style="color: #00ff00;">jscript9!Js::TypedArrayBase::CreateNewInstance</span> (see the arrow):</p><pre class="ignore:true">jscript9!Js::TypedArray&lt;int&gt;::NewInstance:
+6f79aebb 8bff            mov     edi,edi
+6f79aebd 55              push    ebp
+6f79aebe 8bec            mov     ebp,esp
+6f79aec0 83e4f8          and     esp,0FFFFFFF8h
+6f79aec3 83ec0c          sub     esp,0Ch
+6f79aec6 53              push    ebx
+6f79aec7 8b5d08          mov     ebx,dword ptr [ebp+8]
+6f79aeca 8b4304          mov     eax,dword ptr [ebx+4]
+6f79aecd 8b4004          mov     eax,dword ptr [eax+4]
+6f79aed0 8b4804          mov     ecx,dword ptr [eax+4]
+6f79aed3 56              push    esi
+6f79aed4 57              push    edi
+6f79aed5 6a00            push    0
+6f79aed7 51              push    ecx
+6f79aed8 8b8934020000    mov     ecx,dword ptr [ecx+234h]
+6f79aede ba00040000      mov     edx,400h
+6f79aee3 e8b2e7e0ff      call    jscript9!ThreadContext::ProbeStack (6f5a969a)
+6f79aee8 8d4510          lea     eax,[ebp+10h]
+6f79aeeb 50              push    eax
+6f79aeec 8d7d0c          lea     edi,[ebp+0Ch]
+6f79aeef 8d742414        lea     esi,[esp+14h]
+6f79aef3 e8cb93e0ff      call    jscript9!Js::ArgumentReader::ArgumentReader (6f5a42c3)
+6f79aef8 8b4304          mov     eax,dword ptr [ebx+4]
+6f79aefb 8b4004          mov     eax,dword ptr [eax+4]
+6f79aefe 6850bd726f      push    offset jscript9!Js::TypedArray&lt;int&gt;::Create (6f72bd50)
+6f79af03 6a04            push    4
+6f79af05 ff7004          push    dword ptr [eax+4]
+6f79af08 8bc6            mov     eax,esi
+6f79af0a 50              push    eax
+6f79af0b e8214b0000      call    jscript9!Js::TypedArrayBase::CreateNewInstance (6f79fa31)
+6f79af10 5f              pop     edi      &lt;---------------------- breakpoint here
+6f79af11 5e              pop     esi
+6f79af12 5b              pop     ebx
+6f79af13 8be5            mov     esp,ebp
+6f79af15 5d              pop     ebp
+6f79af16 c3              ret</pre><p>Here’s the breakpoint:</p><pre class="ignore:true">bp jscript9+20af10 ".printf \"new TypedArray&lt;int&gt;: addr = 0x%p\\n\",eax;g"</pre><p>We should also take a look at <span style="color: #00ff00;">jscript9!Js::JavascriptArrayBuffer::Create</span>:</p><pre class="ignore:true">0:004&gt; uf jscript9!Js::JavascriptArrayBuffer::Create
+jscript9!Js::JavascriptArrayBuffer::Create:
+6f643cbe 8bff            mov     edi,edi
+6f643cc0 55              push    ebp
+6f643cc1 8bec            mov     ebp,esp
+6f643cc3 53              push    ebx
+6f643cc4 8b5d08          mov     ebx,dword ptr [ebp+8]
+6f643cc7 56              push    esi
+6f643cc8 57              push    edi
+6f643cc9 8bf8            mov     edi,eax
+6f643ccb 8b4304          mov     eax,dword ptr [ebx+4]
+6f643cce 8b4004          mov     eax,dword ptr [eax+4]
+6f643cd1 8bb064040000    mov     esi,dword ptr [eax+464h]
+6f643cd7 01be04410000    add     dword ptr [esi+4104h],edi
+6f643cdd e85936f5ff      call    jscript9!Recycler::CollectNow&lt;402722819&gt; (6f59733b)
+6f643ce2 6a18            push    18h     &lt;----------- 18h bytes
+6f643ce4 8bce            mov     ecx,esi
+6f643ce6 e8b958f5ff      call    jscript9!Recycler::AllocFinalized (6f5995a4)
+6f643ceb ff353cb1826f    push    dword ptr [jscript9!_imp__malloc (6f82b13c)]   &lt;--------------------
+6f643cf1 8bf0            mov     esi,eax
+6f643cf3 8bcb            mov     ecx,ebx
+6f643cf5 e863010000      call    jscript9!Js::ArrayBuffer::ArrayBuffer&lt;void * (__cdecl*)(unsigned int)&gt; (6f643e5d)
+6f643cfa 5f              pop     edi
+6f643cfb c706103d646f    mov     dword ptr [esi],offset jscript9!Js::JavascriptArrayBuffer::`vftable' (6f643d10)
+6f643d01 8bc6            mov     eax,esi
+6f643d03 5e              pop     esi
+6f643d04 5b              pop     ebx
+6f643d05 5d              pop     ebp
+6f643d06 c20400          ret     4    &lt;----------- put a breakpoint here</pre><p>As you can see, an <span style="color: #00ff00;">ArrayBuffer</span> is an object of <span style="color: #00ff00;">18h</span> bytes which is allocated through <span style="color: #00ff00;">jscript9!Recycler::AllocFinalized</span>. It’s almost certain that <span style="color: #00ff00;">ArrayBuffer</span> contains a pointer to a block of memory which contains the user data. In fact, you can see that <span style="color: #00ff00;">jscript9!_imp__malloc</span> is passed to the constructor of <span style="color: #00ff00;">ArrayBuffer</span> and we already know that the raw buffer is indeed allocated with C’s <span style="color: #00ff00;">malloc</span>.</p><p>We can now put a breakpoint at then end of the function:</p><pre class="ignore:true">bp jscript9!Js::JavascriptArrayBuffer::Create+0x48 ".printf \"new JavascriptArrayBuffer: addr = 0x%p\\n\",eax;g"</pre><p>These objects are easy to analyze. Here’s what we learned:<br> 
+<a href="images/pic_17.png"><img src="images/pic_17.png" alt="pic_17" width="1176" height="830"></a>
+</p><p style="text-align: center;"><span style="font-size: 40px;">&nbsp;<a href="ie-10-from-one-byte-write-to-full-process-space-readwrite.html">Next Part</a> →<br> </span></p> </div></div>
+
+</body>
+</html>

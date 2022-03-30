@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>TITLE</title>
+    <link rel="stylesheet" href="styles.css">
+
+    <link rel="stylesheet" href="highlight/styles/stackoverflow-dark.min.css">
+    <script src="highlight/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+</head>
+<body>
+
+<div class="inner-content"><header class="page-header"><h1 class="page-title">Structured Exception Handling (SEH)</h1></header><div class="page-content"><p>The <span style="color: #00ccff;">exception handlers</span> are organized in a <span style="color: #00ccff;">singly-linked list</span> associated with each thread. As a rule, the nodes of that list are allocated on the stack.<br> The head of the list is pointed to by a pointer located at the beginning of the <span style="color: #00ccff;">TEB</span> (<span style="color: #00ccff;">T</span>hread <span style="color: #00ccff;">E</span>nvironment <span style="color: #00ccff;">B</span>lock), so when the code wants to add a new exception handler, a new node is added to the head of the list and the pointer in the <span style="color: #00ccff;">TEB</span> is changed to point to the new node.<br> Each node is of type&nbsp;<span style="color: #00ff00;">_EXCEPTION_REGISTRATION_RECORD</span> and stores the address of the handler and a pointer to the next node of the list. Oddly enough, the “<span style="color: #00ff00;">next pointer</span>” of the last node of the list is not null but equal to <span style="color: #00ff00;">0xffffffff</span>. Here’s the exact definition:</p><pre class="ignore:true">0:000&gt; dt _EXCEPTION_REGISTRATION_RECORD
+ntdll!_EXCEPTION_REGISTRATION_RECORD
+&nbsp;&nbsp; +0x000 Next&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : Ptr32 _EXCEPTION_REGISTRATION_RECORD
+&nbsp;&nbsp; +0x004 Handler&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : Ptr32&nbsp;&nbsp;&nbsp;&nbsp; _EXCEPTION_DISPOSITION</pre><p>The <span style="color: #00ccff;">TEB</span> can also be accessed through the <span style="color: #00ccff;">selector</span> <span style="color: #00ff00;">fs</span>, starting from <span style="color: #00ff00;">fs:[0]</span>, so it’s common to see code like the following:</p>
+
+<pre><code class="language-x86asm">mov    eax, dword ptr fs:[00000000h]      ; retrieve the head
+push   eax                                ; save the old head
+lea    eax, [ebp-10h]
+mov    dword ptr fs:[00000000h], eax      ; set the new head
+.
+.
+.
+mov    ecx, dword ptr [ebp-10h]           ; get the old head (NEXT field of the current head)
+mov    dword ptr fs:[00000000h], ecx      ; restore the old head</code></pre>
+
+<p>Compilers usually register a single <span style="color: #00ccff;">global handler</span> that knows which area of the program is being executed (relying on a global variable) and behaves accordingly when it’s called.<br> Since each thread has a different <span style="color: #00ccff;">TEB</span>, the operating system makes sure that the segment selected by <span style="color: #00ff00;">fs</span> refers always to the right <span style="color: #00ccff;">TEB</span> (i.e. the one of the current thread). To get the address of the <span style="color: #00ccff;">TEB</span>, read <span style="color: #00ff00;">fs:[18h]</span> which corresponds to the field <span style="color: #00ff00;">Self</span> of the <span style="color: #00ccff;">TEB</span>.</p><p>Let’s display the <span style="color: #00ccff;">TEB</span>:</p><pre class="ignore:true">0:000&gt; !teb
+TEB at 7efdd000
+&nbsp;&nbsp;&nbsp; ExceptionList:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 003ef804          &lt;-----------------------
+&nbsp;&nbsp;&nbsp; StackBase:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 003f0000
+&nbsp;&nbsp;&nbsp; StackLimit:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 003ed000
+&nbsp;&nbsp;&nbsp; SubSystemTib:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 00000000
+&nbsp;&nbsp;&nbsp; FiberData:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 00001e00
+&nbsp;&nbsp;&nbsp; ArbitraryUserPointer: 00000000
+&nbsp;&nbsp;&nbsp; Self:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 7efdd000
+&nbsp;&nbsp;&nbsp; EnvironmentPointer:&nbsp;&nbsp; 00000000
+&nbsp;&nbsp;&nbsp; ClientId:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 00001644 . 00000914
+&nbsp;&nbsp;&nbsp; RpcHandle:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 00000000
+&nbsp;&nbsp;&nbsp; Tls Storage:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 7efdd02c
+&nbsp;&nbsp;&nbsp; PEB Address:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 7efde000
+&nbsp;&nbsp;&nbsp; LastErrorValue:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 2
+&nbsp;&nbsp;&nbsp; LastStatusValue:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; c0000034
+&nbsp;&nbsp;&nbsp; Count Owned Locks:&nbsp;&nbsp;&nbsp; 0
+&nbsp;&nbsp;&nbsp; HardErrorMode:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0</pre><p>Now let’s verify that <span style="color: #00ff00;">fs</span> refers to the <span style="color: #00ccff;">TEB</span>:</p><pre class="ignore:true">0:000&gt; dg fs
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; P Si Gr Pr Lo
+Sel&nbsp;&nbsp;&nbsp; Base&nbsp;&nbsp;&nbsp;&nbsp; Limit&nbsp;&nbsp;&nbsp;&nbsp; Type&nbsp;&nbsp;&nbsp; l ze an es ng Flags
+---- -------- -------- ---------- - -- -- -- -- --------
+0053 7efdd000 00000fff Data RW Ac 3 Bg By P&nbsp; Nl 000004f3</pre><p>As we said above, <span style="color: #00ff00;">fs:18h</span> contains the address of the <span style="color: #00ccff;">TEB</span>:</p><pre class="ignore:true">0:000&gt; ? poi(fs:[18])
+Evaluate expression: 2130563072 = 7efdd000</pre><p>Remember that <span style="color: #00ff00;">poi</span> dereferences a pointer and ‘<span style="color: #00ff00;">?</span>‘ is used to evaluate an expression.</p><p>Let’s see what’s the name of the structure pointed to by <span style="color: #00ff00;">ExceptionList</span> above:</p><pre class="ignore:true">0:000&gt; dt nt!_NT_TIB ExceptionList
+ntdll!_NT_TIB
+&nbsp;&nbsp; +0x000 ExceptionList : Ptr32 _EXCEPTION_REGISTRATION_RECORD</pre><p>This means that each node is an instance of <span style="color: #00ff00;">_EXCEPTION_REGISTRATION_RECORD</span>, as we already said.<br> To display the entire list, use <span style="color: #00ff00;">!slist</span>:</p><pre class="ignore:true">0:000&gt; !slist $teb _EXCEPTION_REGISTRATION_RECORD
+SLIST HEADER:
+&nbsp;&nbsp; +0x000 Alignment&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : 3f0000003ef804
+&nbsp;&nbsp; +0x000 Next&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : 3ef804
+&nbsp;&nbsp; +0x004 Depth&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : 0
+&nbsp;&nbsp; +0x006 Sequence&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : 3f
+
+SLIST CONTENTS:
+003ef804
+&nbsp;&nbsp; +0x000 Next&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : 0x003ef850 _EXCEPTION_REGISTRATION_RECORD
+&nbsp;&nbsp; +0x004 Handler&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : 0x6d5da0d5&nbsp;&nbsp;&nbsp;&nbsp; _EXCEPTION_DISPOSITION&nbsp; MSVCR120!_except_handler4+0
+003ef850
+&nbsp;&nbsp; +0x000 Next&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : 0x003ef89c _EXCEPTION_REGISTRATION_RECORD
+&nbsp;&nbsp; +0x004 Handler&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : 0x00271709&nbsp;&nbsp;&nbsp;&nbsp; _EXCEPTION_DISPOSITION&nbsp; +0
+003ef89c
+&nbsp;&nbsp; +0x000 Next&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : 0xffffffff _EXCEPTION_REGISTRATION_RECORD
+&nbsp;&nbsp; +0x004 Handler&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : 0x77e21985&nbsp;&nbsp;&nbsp;&nbsp; _EXCEPTION_DISPOSITION&nbsp; ntdll!_except_handler4+0
+ffffffff
+&nbsp;&nbsp; +0x000 Next&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : ???? 
+&nbsp;&nbsp; +0x004 Handler&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : ???? 
+Can't read memory at ffffffff, error 0</pre><p>Remember that <span style="color: #00ff00;">$teb</span> is the address of the <span style="color: #00ccff;">TEB</span>.</p><p>A simpler way to display the exception handler chain is to use</p><pre class="ignore:true">0:000&gt; !exchain
+003ef804: MSVCR120!_except_handler4+0 (6d5da0d5)
+&nbsp; CRT scope&nbsp; 0, func:&nbsp;&nbsp; MSVCR120!doexit+116 (6d613b3b)
+003ef850: exploitme3+1709 (00271709)
+003ef89c: ntdll!_except_handler4+0 (77e21985)
+&nbsp; CRT scope&nbsp; 0, filter: ntdll!__RtlUserThreadStart+2e (77e21c78)
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; func:&nbsp;&nbsp; ntdll!__RtlUserThreadStart+63 (77e238cb)</pre><p>We can also examine the exception handler chain manually:</p><pre class="ignore:true ">0:000&gt; dt 003ef804 _EXCEPTION_REGISTRATION_RECORD
+MSVCR120!_EXCEPTION_REGISTRATION_RECORD
+&nbsp;&nbsp; +0x000 Next&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : 0x003ef850 _EXCEPTION_REGISTRATION_RECORD
+&nbsp;&nbsp; +0x004 Handler&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : 0x6d5da0d5&nbsp;&nbsp;&nbsp;&nbsp; _EXCEPTION_DISPOSITION&nbsp; MSVCR120!_except_handler4+0
+0:000&gt; dt 0x003ef850 _EXCEPTION_REGISTRATION_RECORD
+MSVCR120!_EXCEPTION_REGISTRATION_RECORD
+&nbsp;&nbsp; +0x000 Next&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : 0x003ef89c _EXCEPTION_REGISTRATION_RECORD
+&nbsp;&nbsp; +0x004 Handler&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : 0x00271709&nbsp;&nbsp;&nbsp;&nbsp; _EXCEPTION_DISPOSITION&nbsp; +0
+0:000&gt; dt 0x003ef89c _EXCEPTION_REGISTRATION_RECORD
+MSVCR120!_EXCEPTION_REGISTRATION_RECORD
+&nbsp;&nbsp; +0x000 Next&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : 0xffffffff _EXCEPTION_REGISTRATION_RECORD
+&nbsp;&nbsp; +0x004 Handler&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : 0x77e21985&nbsp;&nbsp;&nbsp;&nbsp; _EXCEPTION_DISPOSITION&nbsp; ntdll!_except_handler4+0</pre> </div></div>
+
+</body>
+</html>

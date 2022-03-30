@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Heap</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="inner-content"><header class="page-header"><h1 class="page-title">Heap</h1></header><div class="page-content"><p>When a process starts, the <span style="color: #00ccff;">heap manager</span> creates a new <span style="color: #00ccff;">heap</span> called the <span style="color: #00ccff;">default process heap</span>. <span style="color: #00ccff;">C/C++</span> applications also creates the so-called <span style="color: #00ccff;">CRT heap</span> (used by <span style="color: #00ccff;">new</span>/<span style="color: #00ccff;">delete</span>, <span style="color: #00ccff;">malloc</span>/<span style="color: #00ccff;">free</span> and their variants). It is also possible to create other heaps via the <span style="color: #00ccff;">HeapCreate</span> API function. The <span style="color: #00ccff;">Windows heap manager</span> can be broken down into two components: the <span style="color: #00ccff;">Front End Allocator</span> and the <span style="color: #00ccff;">Back End Allocator</span>.</p><h2>Front End Allocator</h2><p>The <span style="color: #00ccff;">front end allocator</span> is an abstract optimization layer for the <span style="color: #00ccff;">back end allocator</span>. There are different types of <span style="color: #00ccff;">front end allocators</span> which are optimized for different use cases. The <span style="color: #00ccff;">front end allocators</span> are:</p><ol><li><span style="color: #00ccff;">Look aside list</span> (<span style="color: #00ccff;">LAL</span>) <span style="color: #00ccff;">front end allocator</span></li><li><span style="color: #00ccff;">Low fragmentation</span> (<span style="color: #00ccff;">LF</span>) <span style="color: #00ccff;">front end allocator</span></li></ol><p>The <span style="color: #00ccff;">LAL</span> is a table of 128 <span style="color: #00ccff;">singly-linked lists</span>. Each list contains <span style="color: #00ccff;">free blocks</span> of a specific size, starting at 16 bytes. The size of each block includes 8 bytes of <span style="color: #00ccff;">metadata</span> used to manage the block. The formula for determining the index into the table given the size is <span style="color: #00ff00;">index = ceil((size + 8)/8) – 1</span> where the “<span style="color: #00ff00;">+8</span>” accounts for the metadata. Note that <span style="color: #00ff00;">index</span> is always positive.</p><p>Starting with <span style="color: #00ccff;">Windows Vista</span>, the <span style="color: #00ccff;">LAL front end allocator</span> isn’t present anymore and the <span style="color: #00ccff;">LFH front end allocator</span> is used instead. The <span style="color: #00ccff;">LFH front end allocator</span> is very complex, but the main idea is that it tries to reduce the heap fragmentation by allocating the smallest block of memory that is large enough to contain data of the requested size.</p><h2>Back End Allocator</h2><p>If the <span style="color: #00ccff;">front end allocator</span> is unable to satisfy an allocation request, the request is sent to the <span style="color: #00ccff;">back end allocator</span>.</p><p>In <span style="color: #00ccff;">Windows XP</span>, the <span style="color: #00ccff;">back end allocator</span> uses a table similar to that used in the <span style="color: #00ccff;">front end allocator</span>. The list at index 0 of the table contains free blocks whose size is greater than 1016 bytes and less than or equal to the <span style="color: #00ccff;">virtual allocation limit</span> (<span style="color: #00ff00;">0x7FFF0</span> bytes). The blocks in this list are sorted by size in ascending order. The index 1 is unused and, in general, index <span style="color: #00ff00;">x</span> contains free blocks of size <span style="color: #00ff00;">8x</span>. When a block of a given size is needed but isn’t available, the <span style="color: #00ccff;">back end allocator</span> tries to split bigger blocks into blocks of the needed size. The opposite process, called <span style="color: #00ccff;">heap coalescing</span> is also possible: when a block is freed, the heap manager checks the two adjacent blocks and if one or both of them are free, the free blocks may be coalesced into a single block. This reduces <span style="color: #00ccff;">heap fragmentation</span>. For allocations of size greater than <span style="color: #00ff00;">0x7FFF0</span> bytes the heap manager sends an explicit allocation request to the <span style="color: #00ccff;">virtual memory manager</span> and keeps the allocated blocks on a list called the <span style="color: #00ccff;">virtual allocation list</span>.</p><p>In <span style="color: #00ccff;">Windows 7</span>, there aren’t any longer dedicated <span style="color: #00ccff;">free lists</span> for specific sizes. <span style="color: #00ccff;">Windows 7</span> uses a single <span style="color: #00ccff;">free list</span> which holds blocks of all sizes sorted by size in ascending order, and another list of nodes (of type <span style="color: #00ccff;">ListHint</span>) which point to nodes in the free list and are used to find the nodes of the appropriate size to satisfy the allocation request.</p><h2>Heap segments</h2><p>All the memory used by the <span style="color: #00ccff;">heap manager</span> is requested from the <span style="color: #00ccff;">Windows virtual memory manager</span>. The <span style="color: #00ccff;">heap manager</span> requests big chunks of virtual memory called <span style="color: #00ccff;">segments</span>. Those <span style="color: #00ccff;">segments</span> are then used by the <span style="color: #00ccff;">heap manager</span> to allocate all the blocks and the internal bookkeeping structures. When a new <span style="color: #00ccff;">segment</span> is created, its memory is just reserved and only a small portion of it is committed. When more memory is needed, another portion is committed. Finally, when there isn’t enough uncommitted space in the current <span style="color: #00ccff;">segment</span>, a new <span style="color: #00ccff;">segment</span> is created which is twice as big as the previous <span style="color: #00ccff;">segment</span>. If this isn’t possible because there isn’t enough memory, a smaller <span style="color: #00ccff;">segment</span> is created. If the available space is insufficient even for the smallest possible <span style="color: #00ccff;">segment</span>, an error is returned.</p><h2>Analyzing the Heap</h2><p>The list of heaps is contained in the <span style="color: #00ccff;">PEB</span> (<span style="color: #00ccff;">P</span>rocess <span style="color: #00ccff;">E</span>nvironment <span style="color: #00ccff;">B</span>lock) at offset 0x90:</p><pre class="ignore:true">0:001&gt; dt _PEB @$peb
+ ntdll!_PEB
+ +0x000 InheritedAddressSpace : 0 ''
+ +0x001 ReadImageFileExecOptions : 0 ''
+ +0x002 BeingDebugged&nbsp;&nbsp;&nbsp; : 0x1 ''
+ +0x003 BitField&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : 0x8 ''
+ +0x003 ImageUsesLargePages : 0y0
+ +0x003 IsProtectedProcess : 0y0
+ +0x003 IsLegacyProcess&nbsp; : 0y0
+ +0x003 IsImageDynamicallyRelocated : 0y1
+ +0x003 SkipPatchingUser32Forwarders : 0y0
+ +0x003 SpareBits&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : 0y000
+ +0x004 Mutant&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : 0xffffffff Void
+ +0x008 ImageBaseAddress : 0x004a0000 Void
+ +0x00c Ldr&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : 0x77eb0200 _PEB_LDR_DATA
+ +0x010 ProcessParameters : 0x002d13c8 _RTL_USER_PROCESS_PARAMETERS
+ +0x014 SubSystemData&nbsp;&nbsp;&nbsp; : (null)
+ +0x018 ProcessHeap&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : 0x002d0000 Void
+ +0x01c FastPebLock&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : 0x77eb2100 _RTL_CRITICAL_SECTION
+ +0x020 AtlThunkSListPtr : (null)
+ +0x024 IFEOKey&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : (null)
+ +0x028 CrossProcessFlags : 0
+ +0x028 ProcessInJob&nbsp;&nbsp;&nbsp;&nbsp; : 0y0
+ +0x028 ProcessInitializing : 0y0
+ +0x028 ProcessUsingVEH&nbsp; : 0y0
+ +0x028 ProcessUsingVCH&nbsp; : 0y0
+ +0x028 ProcessUsingFTH&nbsp; : 0y0
+ +0x028 ReservedBits0&nbsp;&nbsp;&nbsp; : 0y000000000000000000000000000 (0)
+ +0x02c KernelCallbackTable : 0x760eb9f0 Void
+ +0x02c UserSharedInfoPtr : 0x760eb9f0 Void
+ +0x030 SystemReserved&nbsp;&nbsp; : [1] 0
+ +0x034 AtlThunkSListPtr32 : 0
+ +0x038 ApiSetMap&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : 0x00040000 Void
+ +0x03c TlsExpansionCounter : 0
+ +0x040 TlsBitmap&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : 0x77eb4250 Void
+ +0x044 TlsBitmapBits&nbsp;&nbsp;&nbsp; : [2] 0x1fffffff
+ +0x04c ReadOnlySharedMemoryBase : 0x7efe0000 Void
+ +0x050 HotpatchInformation : (null)
+ +0x054 ReadOnlyStaticServerData : 0x7efe0a90&nbsp; -&gt; (null)
+ +0x058 AnsiCodePageData : 0x7efb0000 Void
+ +0x05c OemCodePageData&nbsp; : 0x7efc0228 Void
+ +0x060 UnicodeCaseTableData : 0x7efd0650 Void
+ +0x064 NumberOfProcessors : 8
+ +0x068 NtGlobalFlag&nbsp;&nbsp;&nbsp;&nbsp; : 0x70
+ +0x070 CriticalSectionTimeout : _LARGE_INTEGER 0xffffe86d`079b8000
+ +0x078 HeapSegmentReserve : 0x100000
+ +0x07c HeapSegmentCommit : 0x2000
+ +0x080 HeapDeCommitTotalFreeThreshold : 0x10000
+ +0x084 HeapDeCommitFreeBlockThreshold : 0x1000
+ +0x088 NumberOfHeaps&nbsp;&nbsp;&nbsp; : 7
+ +0x08c MaximumNumberOfHeaps : 0x10
+ +0x090 ProcessHeaps&nbsp;&nbsp;&nbsp;&nbsp; : 0x77eb4760&nbsp; -&gt; 0x002d0000 Void
+ +0x094 GdiSharedHandleTable : (null)
+ +0x098 ProcessStarterHelper : (null)
+ +0x09c GdiDCAttributeList : 0
+ +0x0a0 LoaderLock&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : 0x77eb20c0 _RTL_CRITICAL_SECTION
+ +0x0a4 OSMajorVersion&nbsp;&nbsp; : 6
+ +0x0a8 OSMinorVersion&nbsp;&nbsp; : 1
+ +0x0ac OSBuildNumber&nbsp;&nbsp;&nbsp; : 0x1db1
+ +0x0ae OSCSDVersion&nbsp;&nbsp;&nbsp;&nbsp; : 0x100
+ +0x0b0 OSPlatformId&nbsp;&nbsp;&nbsp;&nbsp; : 2
+ +0x0b4 ImageSubsystem&nbsp;&nbsp; : 2
+ +0x0b8 ImageSubsystemMajorVersion : 6
+ +0x0bc ImageSubsystemMinorVersion : 1
+ +0x0c0 ActiveProcessAffinityMask : 0xff
+ +0x0c4 GdiHandleBuffer&nbsp; : [34] 0
+ +0x14c PostProcessInitRoutine : (null)
+ +0x150 TlsExpansionBitmap : 0x77eb4248 Void
+ +0x154 TlsExpansionBitmapBits : [32] 1
+ +0x1d4 SessionId&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : 1
+ +0x1d8 AppCompatFlags&nbsp;&nbsp; : _ULARGE_INTEGER 0x0
+ +0x1e0 AppCompatFlagsUser : _ULARGE_INTEGER 0x0
+ +0x1e8 pShimData&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : (null)
+ +0x1ec AppCompatInfo&nbsp;&nbsp;&nbsp; : (null)
+ +0x1f0 CSDVersion&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : _UNICODE_STRING "Service Pack 1"
+ +0x1f8 ActivationContextData : 0x00060000 _ACTIVATION_CONTEXT_DATA
+ +0x1fc ProcessAssemblyStorageMap : 0x002d4988 _ASSEMBLY_STORAGE_MAP
+ +0x200 SystemDefaultActivationContextData : 0x00050000 _ACTIVATION_CONTEXT_DATA
+ +0x204 SystemAssemblyStorageMap : (null)
+ +0x208 MinimumStackCommit : 0
+ +0x20c FlsCallback&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : 0x002d5cb8 _FLS_CALLBACK_INFO
+ +0x210 FlsListHead&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : _LIST_ENTRY [ 0x2d5a98 - 0x2d5a98 ]
+ +0x218 FlsBitmap&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : 0x77eb4240 Void
+ +0x21c FlsBitmapBits&nbsp;&nbsp;&nbsp; : [4] 0x1f
+ +0x22c FlsHighIndex&nbsp;&nbsp;&nbsp;&nbsp; : 4
+ +0x230 WerRegistrationData : (null)
+ +0x234 WerShipAssertPtr : (null)
+ +0x238 pContextData&nbsp;&nbsp;&nbsp;&nbsp; : 0x00070000 Void
+ +0x23c pImageHeaderHash : (null)
+ +0x240 TracingFlags&nbsp;&nbsp;&nbsp;&nbsp; : 0
+ +0x240 HeapTracingEnabled : 0y0
+ +0x240 CritSecTracingEnabled : 0y0
+ +0x240 SpareTracingBits : 0y000000000000000000000000000000 (0)</pre><p>The interesting part is this:</p><pre class="ignore:true">+0x088 NumberOfHeaps&nbsp;&nbsp;&nbsp; : 7
+.
++0x090 ProcessHeaps&nbsp;&nbsp;&nbsp;&nbsp; : 0x77eb4760&nbsp; -&gt; 0x002d0000 Void</pre><p><span style="color: #00ff00;">ProcessHeaps</span> points to an array of pointers to <span style="color: #00ff00;">HEAP</span> structures (one pointer per heap).<br> Let’s see the array:</p><pre class="ignore:true">0:001&gt; dd 0x77eb4760
+ 77eb4760&nbsp; 002d0000 005b0000 01e30000 01f90000
+ 77eb4770&nbsp; 02160000 02650000 02860000 00000000
+ 77eb4780&nbsp; 00000000 00000000 00000000 00000000
+ 77eb4790&nbsp; 00000000 00000000 00000000 00000000
+ 77eb47a0&nbsp; 00000000 00000000 00000000 00000000
+ 77eb47b0&nbsp; 00000000 00000000 00000000 00000000
+ 77eb47c0&nbsp; 00000000 00000000 00000000 00000000
+ 77eb47d0&nbsp; 00000000 00000000 00000000 00000000</pre><p>We can display the <span style="color: #00ff00;">HEAP</span> structure of the first heap like this:</p><pre class="ignore:true">0:001&gt; dt _HEAP 2d0000
+ ntdll!_HEAP
+ +0x000 Entry&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : _HEAP_ENTRY
+ +0x008 SegmentSignature : 0xffeeffee
+ +0x00c SegmentFlags&nbsp;&nbsp;&nbsp;&nbsp; : 0
+ +0x010 SegmentListEntry : _LIST_ENTRY [ 0x2d00a8 - 0x2d00a8 ]
+ +0x018 Heap&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : 0x002d0000 _HEAP
+ +0x01c BaseAddress&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : 0x002d0000 Void
+ +0x020 NumberOfPages&nbsp;&nbsp;&nbsp; : 0x100
+ +0x024 FirstEntry&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : 0x002d0588 _HEAP_ENTRY
+ +0x028 LastValidEntry&nbsp;&nbsp; : 0x003d0000 _HEAP_ENTRY
+ +0x02c NumberOfUnCommittedPages : 0xd0
+ +0x030 NumberOfUnCommittedRanges : 1
+ +0x034 SegmentAllocatorBackTraceIndex : 0
+ +0x036 Reserved&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : 0
+ +0x038 UCRSegmentList&nbsp;&nbsp; : _LIST_ENTRY [ 0x2ffff0 - 0x2ffff0 ]
+ +0x040 Flags&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : 0x40000062
+ +0x044 ForceFlags&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : 0x40000060
+ +0x048 CompatibilityFlags : 0
+ +0x04c EncodeFlagMask&nbsp;&nbsp; : 0x100000
+ +0x050 Encoding&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : _HEAP_ENTRY
+ +0x058 PointerKey&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : 0x7d37bf2e
+ +0x05c Interceptor&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : 0
+ +0x060 VirtualMemoryThreshold : 0xfe00
+ +0x064 Signature&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : 0xeeffeeff
+ +0x068 SegmentReserve&nbsp;&nbsp; : 0x100000
+ +0x06c SegmentCommit&nbsp;&nbsp;&nbsp; : 0x2000
+ +0x070 DeCommitFreeBlockThreshold : 0x200
+ +0x074 DeCommitTotalFreeThreshold : 0x2000
+ +0x078 TotalFreeSize&nbsp;&nbsp;&nbsp; : 0x1b01
+ +0x07c MaximumAllocationSize : 0x7ffdefff
+ +0x080 ProcessHeapsListIndex : 1
+ +0x082 HeaderValidateLength : 0x138
+ +0x084 HeaderValidateCopy : (null)
+ +0x088 NextAvailableTagIndex : 0
+ +0x08a MaximumTagIndex&nbsp; : 0
+ +0x08c TagEntries&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : (null)
+ +0x090 UCRList&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : _LIST_ENTRY [ 0x2fffe8 - 0x2fffe8 ]
+ +0x098 AlignRound&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : 0x17
+ +0x09c AlignMask&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : 0xfffffff8
+ +0x0a0 VirtualAllocdBlocks : _LIST_ENTRY [ 0x2d00a0 - 0x2d00a0 ]
+ +0x0a8 SegmentList&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : _LIST_ENTRY [ 0x2d0010 - 0x2d0010 ]
+ +0x0b0 AllocatorBackTraceIndex : 0
+ +0x0b4 NonDedicatedListLength : 0
+ +0x0b8 BlocksIndex&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : 0x002d0150 Void
+ +0x0bc UCRIndex&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : 0x002d0590 Void
+ +0x0c0 PseudoTagEntries : (null)
+ +0x0c4 FreeLists&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : _LIST_ENTRY [ 0x2f0a60 - 0x2f28a0 ]
+ +0x0cc LockVariable&nbsp;&nbsp;&nbsp;&nbsp; : 0x002d0138 _HEAP_LOCK
+ +0x0d0 CommitRoutine&nbsp;&nbsp;&nbsp; : 0x7d37bf2e&nbsp;&nbsp;&nbsp;&nbsp; long&nbsp; +7d37bf2e
+ +0x0d4 FrontEndHeap&nbsp;&nbsp;&nbsp;&nbsp; : (null)
+ +0x0d8 FrontHeapLockCount : 0
+ +0x0da FrontEndHeapType : 0 ''
+ +0x0dc Counters&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : _HEAP_COUNTERS
+ +0x130 TuningParameters : _HEAP_TUNING_PARAMETERS</pre><p>We can get useful information by using <span style="color: #00ccff;">mona.py</span>. Let’s start with some general information:</p><pre class="ignore:true">0:003&gt; !py mona heap
+Hold on...
+[+] Command used:
+!py mona.py heap
+Peb : 0x7efde000, NtGlobalFlag : 0x00000070
+Heaps:
+------
+0x005a0000 (1 segment(s) : 0x005a0000) * Default process heap&nbsp; Encoding key: 0x171f4fc1
+0x00170000 (2 segment(s) : 0x00170000,0x045a0000)&nbsp;&nbsp; Encoding key: 0x21f9a301
+0x00330000 (1 segment(s) : 0x00330000)&nbsp;&nbsp; Encoding key: 0x1913b812
+0x001d0000 (2 segment(s) : 0x001d0000,0x006a0000)&nbsp;&nbsp; Encoding key: 0x547202aa
+0x020c0000 (1 segment(s) : 0x020c0000)&nbsp;&nbsp; Encoding key: 0x0896f86d
+0x02c50000 (1 segment(s) : 0x02c50000)&nbsp;&nbsp; Encoding key: 0x21f9a301
+0x02b10000 (2 segment(s) : 0x02b10000,0x04450000)&nbsp;&nbsp; Encoding key: 0x757121ce
+
+Please specify a valid searchtype -t
+Valid values are :
+&nbsp;&nbsp; lal
+&nbsp;&nbsp; lfh
+&nbsp;&nbsp; all
+&nbsp;&nbsp; segments
+&nbsp;&nbsp; chunks
+&nbsp;&nbsp; layout
+&nbsp;&nbsp; fea
+&nbsp;&nbsp; bea
+
+[+] This mona.py action took 0:00:00.012000</pre><p>As we can see there are 7 heaps and <span style="color: #00ccff;">mona</span> also shows the <span style="color: #00ccff;">segments</span> for each heap.</p><p>We can also use<span style="color: #00ff00;"> !heap</span>:</p><pre class="ignore:true">0:003&gt; !heap -m
+ Index&nbsp;&nbsp; Address&nbsp; Name&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Debugging options enabled
+ 1:&nbsp;&nbsp; 005a0000
+ Segment at 005a0000 to 006a0000 (0005f000 bytes committed)
+ 2:&nbsp;&nbsp; 00170000
+ Segment at 00170000 to 00180000 (00010000 bytes committed)
+ Segment at 045a0000 to 046a0000 (0000b000 bytes committed)
+ 3:&nbsp;&nbsp; 00330000
+ Segment at 00330000 to 00370000 (00006000 bytes committed)
+ 4:&nbsp;&nbsp; 001d0000
+ Segment at 001d0000 to 001e0000 (0000b000 bytes committed)
+ Segment at 006a0000 to 007a0000 (0002e000 bytes committed)
+ 5:&nbsp;&nbsp; 020c0000
+ Segment at 020c0000 to 02100000 (00001000 bytes committed)
+ 6:&nbsp;&nbsp; 02c50000
+ Segment at 02c50000 to 02c90000 (00025000 bytes committed)
+ 7:&nbsp;&nbsp; 02b10000
+ Segment at 02b10000 to 02b20000 (0000e000 bytes committed)
+ Segment at 04450000 to 04550000 (00033000 bytes committed)</pre><p>The option “<span style="color: #00ff00;">-m</span>” shows also the segments.</p><p>To see the segments for a specific heap (0x5a0000), we can use:</p><pre class="ignore:true">0:003&gt; !py mona heap -h 5a0000 -t segments
+Hold on...
+[+] Command used:
+!py mona.py heap -h 5a0000 -t segments
+Peb : 0x7efde000, NtGlobalFlag : 0x00000070
+Heaps:
+------
+0x005a0000 (1 segment(s) : 0x005a0000) * Default process heap&nbsp; Encoding key: 0x171f4fc1
+0x00170000 (2 segment(s) : 0x00170000,0x045a0000)&nbsp;&nbsp; Encoding key: 0x21f9a301
+0x00330000 (1 segment(s) : 0x00330000)&nbsp;&nbsp; Encoding key: 0x1913b812
+0x001d0000 (2 segment(s) : 0x001d0000,0x006a0000)&nbsp;&nbsp; Encoding key: 0x547202aa
+0x020c0000 (1 segment(s) : 0x020c0000)&nbsp;&nbsp; Encoding key: 0x0896f86d
+0x02c50000 (1 segment(s) : 0x02c50000)&nbsp;&nbsp; Encoding key: 0x21f9a301
+0x02b10000 (2 segment(s) : 0x02b10000,0x04450000)&nbsp;&nbsp; Encoding key: 0x757121ce
+
+
+[+] Processing heap 0x005a0000
+Segment List for heap 0x005a0000:
+---------------------------------
+Segment 0x005a0588 - 0x006a0000 (FirstEntry: 0x005a0588 - LastValidEntry: 0x006a0000): 0x000ffa78 bytes
+
+[+] This mona.py action took 0:00:00.014000</pre><p>Note that <span style="color: #00ccff;">mona</span> shows a summary of all the heaps followed by the specific information we asked. We can also omit “<span style="color: #00ff00;">-h 5a0000</span>” to get a list of the <span style="color: #00ccff;">segments</span> of all the heaps:</p><pre class="ignore:true">0:003&gt; !py mona heap -t segments
+Hold on...
+[+] Command used:
+!py mona.py heap -t segments
+Peb : 0x7efde000, NtGlobalFlag : 0x00000070
+Heaps:
+------
+0x005a0000 (1 segment(s) : 0x005a0000) * Default process heap&nbsp; Encoding key: 0x171f4fc1
+0x00170000 (2 segment(s) : 0x00170000,0x045a0000)&nbsp;&nbsp; Encoding key: 0x21f9a301
+0x00330000 (1 segment(s) : 0x00330000)&nbsp;&nbsp; Encoding key: 0x1913b812
+0x001d0000 (2 segment(s) : 0x001d0000,0x006a0000)&nbsp;&nbsp; Encoding key: 0x547202aa
+0x020c0000 (1 segment(s) : 0x020c0000)&nbsp;&nbsp; Encoding key: 0x0896f86d
+0x02c50000 (1 segment(s) : 0x02c50000)&nbsp;&nbsp; Encoding key: 0x21f9a301
+0x02b10000 (2 segment(s) : 0x02b10000,0x04450000)&nbsp;&nbsp; Encoding key: 0x757121ce
+
+
+[+] Processing heap 0x005a0000
+Segment List for heap 0x005a0000:
+---------------------------------
+Segment 0x005a0588 - 0x006a0000 (FirstEntry: 0x005a0588 - LastValidEntry: 0x006a0000): 0x000ffa78 bytes
+
+[+] Processing heap 0x00170000
+Segment List for heap 0x00170000:
+---------------------------------
+Segment 0x00170588 - 0x00180000 (FirstEntry: 0x00170588 - LastValidEntry: 0x00180000): 0x0000fa78 bytes
+Segment 0x045a0000 - 0x046a0000 (FirstEntry: 0x045a0040 - LastValidEntry: 0x046a0000): 0x00100000 bytes
+
+[+] Processing heap 0x00330000
+Segment List for heap 0x00330000:
+---------------------------------
+Segment 0x00330588 - 0x00370000 (FirstEntry: 0x00330588 - LastValidEntry: 0x00370000): 0x0003fa78 bytes
+
+[+] Processing heap 0x001d0000
+Segment List for heap 0x001d0000:
+---------------------------------
+Segment 0x001d0588 - 0x001e0000 (FirstEntry: 0x001d0588 - LastValidEntry: 0x001e0000): 0x0000fa78 bytes
+Segment 0x006a0000 - 0x007a0000 (FirstEntry: 0x006a0040 - LastValidEntry: 0x007a0000): 0x00100000 bytes
+
+[+] Processing heap 0x020c0000
+Segment List for heap 0x020c0000:
+---------------------------------
+Segment 0x020c0588 - 0x02100000 (FirstEntry: 0x020c0588 - LastValidEntry: 0x02100000): 0x0003fa78 bytes
+
+[+] Processing heap 0x02c50000
+Segment List for heap 0x02c50000:
+---------------------------------
+Segment 0x02c50588 - 0x02c90000 (FirstEntry: 0x02c50588 - LastValidEntry: 0x02c90000): 0x0003fa78 bytes
+
+[+] Processing heap 0x02b10000
+Segment List for heap 0x02b10000:
+---------------------------------
+Segment 0x02b10588 - 0x02b20000 (FirstEntry: 0x02b10588 - LastValidEntry: 0x02b20000): 0x0000fa78 bytes
+Segment 0x04450000 - 0x04550000 (FirstEntry: 0x04450040 - LastValidEntry: 0x04550000): 0x00100000 bytes
+
+[+] This mona.py action took 0:00:00.017000</pre><p><span style="color: #00ccff;">mona.py</span> calls the allocated block of memory <span style="color: #00ccff;">chunks</span>. To see the <span style="color: #00ccff;">chunks</span> in the segments for a heap use:</p><pre class="ignore:true">0:003&gt; !py mona heap -h 5a0000 -t chunks
+Hold on...
+[+] Command used:
+!py mona.py heap -h 5a0000 -t chunks
+Peb : 0x7efde000, NtGlobalFlag : 0x00000070
+Heaps:
+------
+0x005a0000 (1 segment(s) : 0x005a0000) * Default process heap&nbsp; Encoding key: 0x171f4fc1
+0x00170000 (2 segment(s) : 0x00170000,0x045a0000)&nbsp;&nbsp; Encoding key: 0x21f9a301
+0x00330000 (1 segment(s) : 0x00330000)&nbsp;&nbsp; Encoding key: 0x1913b812
+0x001d0000 (2 segment(s) : 0x001d0000,0x006a0000)&nbsp;&nbsp; Encoding key: 0x547202aa
+0x020c0000 (1 segment(s) : 0x020c0000)&nbsp;&nbsp; Encoding key: 0x0896f86d
+0x02c50000 (1 segment(s) : 0x02c50000)&nbsp;&nbsp; Encoding key: 0x21f9a301
+0x02b10000 (2 segment(s) : 0x02b10000,0x04450000)&nbsp;&nbsp; Encoding key: 0x757121ce
+
+[+] Preparing output file 'heapchunks.txt'
+&nbsp;&nbsp;&nbsp; - (Re)setting logfile heapchunks.txt
+[+] Generating module info table, hang on...
+&nbsp;&nbsp;&nbsp; - Processing modules
+&nbsp;&nbsp;&nbsp; - Done. Let's rock 'n roll.
+
+[+] Processing heap 0x005a0000
+Segment List for heap 0x005a0000:
+---------------------------------
+Segment 0x005a0588 - 0x006a0000 (FirstEntry: 0x005a0588 - LastValidEntry: 0x006a0000): 0x000ffa78 bytes
+&nbsp;&nbsp;&nbsp; Nr of chunks : 2237 
+&nbsp;&nbsp;&nbsp; _HEAP_ENTRY&nbsp; psize&nbsp;&nbsp; size&nbsp; unused&nbsp; UserPtr&nbsp;&nbsp; UserSize
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 005a0588&nbsp; 00000&nbsp; 00250&nbsp;&nbsp; 00001&nbsp; 005a0590&nbsp; 0000024f (591) (Fill pattern,Extra present,Busy) 
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 005a07d8&nbsp; 00250&nbsp; 00030&nbsp;&nbsp; 00018&nbsp; 005a07e0&nbsp; 00000018 (24) (Fill pattern,Extra present,Busy) 
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 005a0808&nbsp; 00030&nbsp; 00bb8&nbsp;&nbsp; 0001a&nbsp; 005a0810&nbsp; 00000b9e (2974) (Fill pattern,Extra present,Busy) 
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 005a13c0&nbsp; 00bb8&nbsp; 01378&nbsp;&nbsp; 0001c&nbsp; 005a13c8&nbsp; 0000135c (4956) (Fill pattern,Extra present,Busy) 
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 005a2738&nbsp; 01378&nbsp; 00058&nbsp;&nbsp; 0001c&nbsp; 005a2740&nbsp; 0000003c (60) (Fill pattern,Extra present,Busy) 
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 005a2790&nbsp; 00058&nbsp; 00048&nbsp;&nbsp; 00018&nbsp; 005a2798&nbsp; 00000030 (48) (Fill pattern,Extra present,Busy) 
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 005a27d8&nbsp; 00048&nbsp; 00090&nbsp;&nbsp; 00018&nbsp; 005a27e0&nbsp; 00000078 (120) (Fill pattern,Extra present,Busy) 
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 005a2868&nbsp; 00090&nbsp; 00090&nbsp;&nbsp; 00018&nbsp; 005a2870&nbsp; 00000078 (120) (Fill pattern,Extra present,Busy) 
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 005a28f8&nbsp; 00090&nbsp; 00058&nbsp;&nbsp; 0001c&nbsp; 005a2900&nbsp; 0000003c (60) (Fill pattern,Extra present,Busy) 
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 005a2950&nbsp; 00058&nbsp; 00238&nbsp;&nbsp; 00018&nbsp; 005a2958&nbsp; 00000220 (544) (Fill pattern,Extra present,Busy) 
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 005a2b88&nbsp; 00238&nbsp; 00060&nbsp;&nbsp; 0001e&nbsp; 005a2b90&nbsp; 00000042 (66) (Fill pattern,Extra present,Busy) 
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; <span style="color: #00ff00;">&lt;snip&gt;</span>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 005ec530&nbsp; 00038&nbsp; 00048&nbsp;&nbsp; 0001c&nbsp; 005ec538&nbsp; 0000002c (44) (Fill pattern,Extra present,Busy) 
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 005ec578&nbsp; 00048&nbsp; 12a68&nbsp;&nbsp; 00000&nbsp; 005ec580&nbsp; 00012a68 (76392) (Fill pattern) 
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 005fefe0&nbsp; 12a68&nbsp; 00020&nbsp;&nbsp; 00003&nbsp; 005fefe8&nbsp; 0000001d (29) (Busy) 
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0x005feff8 - 0x006a0000 (end of segment) : 0xa1008 (659464) uncommitted bytes
+
+Heap : 0x005a0000 : VirtualAllocdBlocks : 0 
+&nbsp;&nbsp;&nbsp; Nr of chunks : 0 
+
+[+] This mona.py action took 0:00:02.804000</pre><p>You can also use <span style="color: #00ff00;">!heap</span>:</p><pre class="ignore:true">0:003&gt; !heap -h 5a0000
+Index&nbsp;&nbsp; Address&nbsp; Name&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Debugging options enabled
+1:&nbsp;&nbsp; 005a0000
+Segment at 005a0000 to 006a0000 (0005f000 bytes committed)
+Flags:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 40000062
+ForceFlags:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 40000060
+Granularity:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 8 bytes
+Segment Reserve:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 00100000
+Segment Commit:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 00002000
+DeCommit Block Thres: 00000200
+DeCommit Total Thres: 00002000
+Total Free Size:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 00002578
+Max. Allocation Size: 7ffdefff
+Lock Variable at:&nbsp;&nbsp;&nbsp;&nbsp; 005a0138
+Next TagIndex:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0000
+Maximum TagIndex:&nbsp;&nbsp;&nbsp;&nbsp; 0000
+Tag Entries:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 00000000
+PsuedoTag Entries:&nbsp;&nbsp;&nbsp; 00000000
+Virtual Alloc List:&nbsp;&nbsp; 005a00a0
+Uncommitted ranges:&nbsp;&nbsp; 005a0090
+FreeList[ 00 ] at 005a00c4: 005ec580 . 005e4f28&nbsp;&nbsp; (18 blocks)
+
+Heap entries for Segment00 in Heap 005a0000
+address: psize . size&nbsp; flags&nbsp;&nbsp; state (requested size)
+005a0000: 00000 . 00588 [101] - busy (587)
+005a0588: 00588 . 00250 [107] - busy (24f), tail fill
+005a07d8: 00250 . 00030 [107] - busy (18), tail fill
+005a0808: 00030 . 00bb8 [107] - busy (b9e), tail fill
+005a13c0: 00bb8 . 01378 [107] - busy (135c), tail fill
+005a2738: 01378 . 00058 [107] - busy (3c), tail fill
+005a2790: 00058 . 00048 [107] - busy (30), tail fill
+005a27d8: 00048 . 00090 [107] - busy (78), tail fill
+005a2868: 00090 . 00090 [107] - busy (78), tail fill
+005a28f8: 00090 . 00058 [107] - busy (3c), tail fill
+005a2950: 00058 . 00238 [107] - busy (220), tail fill
+005a2b88: 00238 . 00060 [107] - busy (42), tail fill
+<span style="color: #00ff00;">&lt;snip&gt;</span>
+005ec530: 00038 . 00048 [107] - busy (2c), tail fill
+005ec578: 00048 . 12a68 [104] free fill
+005fefe0: 12a68 . 00020 [111] - busy (1d)
+005ff000:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 000a1000&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; - uncommitted bytes.</pre><p>To display some statistics, add the option “<span style="color: #00ff00;">-stat</span>“:</p><pre class="ignore:true">0:003&gt; !py mona heap -h 5a0000 -t chunks -stat
+Hold on...
+[+] Command used:
+!py mona.py heap -h 5a0000 -t chunks -stat
+Peb : 0x7efde000, NtGlobalFlag : 0x00000070
+Heaps:
+------
+0x005a0000 (1 segment(s) : 0x005a0000) * Default process heap&nbsp; Encoding key: 0x171f4fc1
+0x00170000 (2 segment(s) : 0x00170000,0x045a0000)&nbsp;&nbsp; Encoding key: 0x21f9a301
+0x00330000 (1 segment(s) : 0x00330000)&nbsp;&nbsp; Encoding key: 0x1913b812
+0x001d0000 (2 segment(s) : 0x001d0000,0x006a0000)&nbsp;&nbsp; Encoding key: 0x547202aa
+0x020c0000 (1 segment(s) : 0x020c0000)&nbsp;&nbsp; Encoding key: 0x0896f86d
+0x02c50000 (1 segment(s) : 0x02c50000)&nbsp;&nbsp; Encoding key: 0x21f9a301
+0x02b10000 (2 segment(s) : 0x02b10000,0x04450000)&nbsp;&nbsp; Encoding key: 0x757121ce
+
+[+] Preparing output file 'heapchunks.txt'
+&nbsp;&nbsp;&nbsp; - (Re)setting logfile heapchunks.txt
+[+] Generating module info table, hang on...
+&nbsp;&nbsp;&nbsp; - Processing modules
+&nbsp;&nbsp;&nbsp; - Done. Let's rock 'n roll.
+
+[+] Processing heap 0x005a0000
+Segment List for heap 0x005a0000:
+---------------------------------
+Segment 0x005a0588 - 0x006a0000 (FirstEntry: 0x005a0588 - LastValidEntry: 0x006a0000): 0x000ffa78 bytes
+&nbsp;&nbsp;&nbsp; Nr of chunks : 2237 
+&nbsp;&nbsp;&nbsp; _HEAP_ENTRY&nbsp; psize&nbsp;&nbsp; size&nbsp; unused&nbsp; UserPtr&nbsp;&nbsp; UserSize
+&nbsp;&nbsp;&nbsp; Segment Statistics:
+&nbsp;&nbsp;&nbsp; Size : 0x12a68 (76392) : 1 chunks (0.04 %)
+&nbsp;&nbsp;&nbsp; Size : 0x3980 (14720) : 1 chunks (0.04 %)
+&nbsp;&nbsp;&nbsp; Size : 0x135c (4956) : 1 chunks (0.04 %)
+&nbsp;&nbsp;&nbsp; Size : 0x11f8 (4600) : 1 chunks (0.04 %)
+&nbsp;&nbsp;&nbsp; Size : 0xb9e (2974) : 1 chunks (0.04 %)
+&nbsp;&nbsp;&nbsp; Size : 0xa28 (2600) : 1 chunks (0.04 %)
+&nbsp;&nbsp;&nbsp; <span style="color: #00ff00;">&lt;snip&gt;</span>
+&nbsp;&nbsp;&nbsp; Size : 0x6 (6) : 1 chunks (0.04 %)
+&nbsp;&nbsp;&nbsp; Size : 0x4 (4) : 15 chunks (0.67 %)
+&nbsp;&nbsp;&nbsp; Size : 0x1 (1) : 1 chunks (0.04 %)
+&nbsp;&nbsp;&nbsp; Total chunks : 2237
+
+
+Heap : 0x005a0000 : VirtualAllocdBlocks : 0 
+&nbsp;&nbsp;&nbsp; Nr of chunks : 0 
+Global statistics
+&nbsp; Size : 0x12a68 (76392) : 1 chunks (0.04 %)
+&nbsp; Size : 0x3980 (14720) : 1 chunks (0.04 %)
+&nbsp; Size : 0x135c (4956) : 1 chunks (0.04 %)
+&nbsp; Size : 0x11f8 (4600) : 1 chunks (0.04 %)
+&nbsp; Size : 0xb9e (2974) : 1 chunks (0.04 %)
+&nbsp; Size : 0xa28 (2600) : 1 chunks (0.04 %)
+&nbsp; <span style="color: #00ff00;">&lt;snip&gt;</span>
+&nbsp; Size : 0x6 (6) : 1 chunks (0.04 %)
+&nbsp; Size : 0x4 (4) : 15 chunks (0.67 %)
+&nbsp; Size : 0x1 (1) : 1 chunks (0.04 %)
+&nbsp; Total chunks : 2237
+
+[+] This mona.py action took 0:00:02.415000</pre><p><span style="color: #00ccff;">mona.py</span> is able to discover <span style="color: #00ccff;">strings</span>, <span style="color: #00ccff;">BSTRING</span>s and <span style="color: #00ccff;">vtable objects</span> in the blocks/chunks of the <span style="color: #00ccff;">segments</span>. To see this information, use “<span style="color: #00ff00;">-t layout</span>“. This function writes the data to the file <span style="color: #00ff00;">heaplayout.txt</span>.<br> You can use the following additional options:</p><ul><li><span style="color: #00ff00;">-v</span>: write the data also in the log window</li><li><span style="color: #00ff00;">-fast</span>: skip the discovery of object sizes</li><li><span style="color: #00ff00;">-size &lt;sz&gt;</span>: skip strings that are smaller than <span style="color: #00ff00;">&lt;sz&gt;</span></li><li><span style="color: #00ff00;">-after &lt;val&gt;</span>: ignore entries inside a chunk until either a <span style="color: #00ccff;">string</span> or <span style="color: #00ccff;">vtable</span> reference is found that contains the value <span style="color: #00ff00;">&lt;val&gt;</span>; then, output everything for the current chunk.</li></ul><p>Example:</p><pre class="ignore:true">0:003&gt; !py mona heap -h 5a0000 -t layout -v
+Hold on...
+[+] Command used:
+!py mona.py heap -h 5a0000 -t layout -v
+Peb : 0x7efde000, NtGlobalFlag : 0x00000070
+Heaps:
+------
+0x005a0000 (1 segment(s) : 0x005a0000) * Default process heap&nbsp; Encoding key: 0x171f4fc1
+0x00170000 (2 segment(s) : 0x00170000,0x045a0000)&nbsp;&nbsp; Encoding key: 0x21f9a301
+0x00330000 (1 segment(s) : 0x00330000)&nbsp;&nbsp; Encoding key: 0x1913b812
+0x001d0000 (2 segment(s) : 0x001d0000,0x006a0000)&nbsp;&nbsp; Encoding key: 0x547202aa
+0x020c0000 (1 segment(s) : 0x020c0000)&nbsp;&nbsp; Encoding key: 0x0896f86d
+0x02c50000 (1 segment(s) : 0x02c50000)&nbsp;&nbsp; Encoding key: 0x21f9a301
+0x02b10000 (2 segment(s) : 0x02b10000,0x04450000)&nbsp;&nbsp; Encoding key: 0x757121ce
+
+[+] Preparing output file 'heaplayout.txt'
+&nbsp;&nbsp;&nbsp; - (Re)setting logfile heaplayout.txt
+[+] Generating module info table, hang on...
+&nbsp;&nbsp;&nbsp; - Processing modules
+&nbsp;&nbsp;&nbsp; - Done. Let's rock 'n roll.
+
+[+] Processing heap 0x005a0000
+----- Heap 0x005a0000, Segment 0x005a0588 - 0x006a0000 (1/1) -----
+Chunk 0x005a0588 (Usersize 0x24f, ChunkSize 0x250) : Fill pattern,Extra present,Busy
+Chunk 0x005a07d8 (Usersize 0x18, ChunkSize 0x30) : Fill pattern,Extra present,Busy
+Chunk 0x005a0808 (Usersize 0xb9e, ChunkSize 0xbb8) : Fill pattern,Extra present,Busy
+&nbsp; +03a3 @ 005a0bab-&gt;005a0d73 : Unicode (0x1c6/454 bytes, 0xe3/227 chars) : Path=C:\Program Files (x86)\Windows Kits\8.1\Debuggers\x86\winext\arcade;C:\Program Files (x86)\NVID...
+&nbsp; +00ec @ 005a0e5f-&gt;005a0eef : Unicode (0x8e/142 bytes, 0x47/71 chars) : PROCESSOR_IDENTIFIER=Intel64 Family 6 Model 60 Stepping 3, GenuineIntel
+&nbsp; +0160 @ 005a104f-&gt;005a10d1 : Unicode (0x80/128 bytes, 0x40/64 chars) : PSModulePath=C:\Windows\system32\WindowsPowerShell\v1.0\Modules\
+&nbsp; +0234 @ 005a1305-&gt;005a1387 : Unicode (0x80/128 bytes, 0x40/64 chars) : WINDBG_DIR=C:\Program Files (x86)\Windows Kits\8.1\Debuggers\x86
+Chunk 0x005a13c0 (Usersize 0x135c, ChunkSize 0x1378) : Fill pattern,Extra present,Busy
+&nbsp; +04a7 @ 005a1867-&gt;005a1ab5 : Unicode (0x24c/588 bytes, 0x126/294 chars) : C:\Windows\System32;;C:\Windows\system32;C:\Windows\system;C:\Windows;.;C:\Program Files (x86)\Windo...
+&nbsp; +046c @ 005a1f21-&gt;005a20e9 : Unicode (0x1c6/454 bytes, 0xe3/227 chars) : Path=C:\Program Files (x86)\Windows Kits\8.1\Debuggers\x86\winext\arcade;C:\Program Files (x86)\NVID...
+&nbsp; +00ec @ 005a21d5-&gt;005a2265 : Unicode (0x8e/142 bytes, 0x47/71 chars) : PROCESSOR_IDENTIFIER=Intel64 Family 6 Model 60 Stepping 3, GenuineIntel
+&nbsp; +0160 @ 005a23c5-&gt;005a2447 : Unicode (0x80/128 bytes, 0x40/64 chars) : PSModulePath=C:\Windows\system32\WindowsPowerShell\v1.0\Modules\
+&nbsp; +0234 @ 005a267b-&gt;005a26fd : Unicode (0x80/128 bytes, 0x40/64 chars) : WINDBG_DIR=C:\Program Files (x86)\Windows Kits\8.1\Debuggers\x86
+Chunk 0x005a2738 (Usersize 0x3c, ChunkSize 0x58) : Fill pattern,Extra present,Busy
+Chunk 0x005a2790 (Usersize 0x30, ChunkSize 0x48) : Fill pattern,Extra present,Busy
+<span style="color: #00ff00;">&lt;snip&gt;</span>
+Chunk 0x005ec4b0 (Usersize 0x30, ChunkSize 0x48) : Fill pattern,Extra present,Busy
+Chunk 0x005ec4f8 (Usersize 0x20, ChunkSize 0x38) : Fill pattern,Extra present,Busy
+Chunk 0x005ec530 (Usersize 0x2c, ChunkSize 0x48) : Fill pattern,Extra present,Busy
+Chunk 0x005ec578 (Usersize 0x12a68, ChunkSize 0x12a68) : Fill pattern
+Chunk 0x005fefe0 (Usersize 0x1d, ChunkSize 0x20) : Busy</pre><p>Consider the following two lines extracted from the output above:</p><pre class="ignore:true">Chunk 0x005a0808 (Usersize 0xb9e, ChunkSize 0xbb8) : Fill pattern,Extra present,Busy
+ +03a3 @ 005a0bab-&gt;005a0d73 : Unicode (0x1c6/454 bytes, 0xe3/227 chars) : Path=C:\Program Files (x86)\Windows Kits\8.1\Debuggers\x86\winext\arcade;C:\Program Files (x86)\NVID...</pre><p>The second line tells us that:</p><ol><li>the entry is at 3a3 bytes from the beginning of the <span style="color: #00ccff;">chunk</span>;</li><li>the entry goes from 5a0bab to 5a0d73;</li><li>the entry is a <span style="color: #00ccff;">Unicode string</span> of 454 bytes or 227 chars;</li><li>the string is “<span style="color: #00ff00;">Path=C:\Program Files (x86)\Windows Kits\…</span>” (snipped).</li></ol> </div></div>
+
+</body>
+</html>
